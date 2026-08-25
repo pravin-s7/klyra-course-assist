@@ -1,0 +1,32 @@
+parse_documents_task:
+  description: >
+    Parse source files for subject "{subject}" under docs/{subject}/week_1..
+    week_12, docs/{subject}/additional, docs/{subject}/pyq, and
+    docs/{subject}/transcripts by calling the parse_subject_documents tool
+    exactly once with subject="{subject}", week={week_filter} (pass this
+    exact value - it is either a specific week number or None to mean "every
+    week"), and force={force} (pass this exact boolean - True means re-parse
+    every matching file even if unchanged since last time, e.g. to pick up
+    newly-added image extraction; False means skip unchanged files as usual).
+    Do not invent content for files that failed to parse - report them
+    instead.
+  expected_output: >
+    The tool's summary of files parsed, skipped (unchanged), degraded
+    (images not understood), and failed, for subject "{subject}".
+  agent: document_parser
+
+index_syllabus_task:
+  description: >
+    For subject "{subject}", you must build the syllabus index.
+    If week={week_filter} is a specific number (not None), you MUST ONLY index that specific week (skip steps 1-2 and just call fetch_parsed_chunks for that week).
+    If week={week_filter} is None, then:
+    Step 1: Call report_syllabus_gaps to get the exact list of missing weeks.
+    Step 2: Calculate the existing weeks (the ones between 1-12 that are NOT in the missing list).
+    Step 3: For EVERY single existing week, you MUST call fetch_parsed_chunks(subject, week=X).
+    Step 4: Extract the concepts from the chunks and call write_syllabus_entries.
+    CRITICAL: Do NOT skip any existing week. For example, if weeks 1, 5, and 6 exist, you MUST make separate fetch_parsed_chunks calls for week 1, week 5, and week 6. Do not stop after week 1!
+    Include the result of report_syllabus_gaps verbatim in your final answer if it was called.
+  expected_output: >
+    A per-week concept count summary for "{subject}" and the explicit list
+    of any missing/empty weeks (1-12) from report_syllabus_gaps.
+  agent: syllabus_indexer

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.chroma/
+.env
+.pytest_cache/
+.klyra_jobs.sqlite3
+.xdg-data/
+tests/
+.cursor/
+.qdrant/
+docker/
+CLIENT_APP_README.md
+docs/

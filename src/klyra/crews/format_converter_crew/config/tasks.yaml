@@ -1,0 +1,43 @@
+convert_documents_task:
+  description: >
+    For subject "{subject}", fulfil this conversion request:
+    {conversion_request}
+
+    For each file involved, determine direction from its extension - .md
+    means convert_markdown_to_latex, .tex means convert_latex_to_markdown -
+    unless the request says otherwise. Call the matching tool for each file;
+    never hand-retype or rewrite content yourself, since the tools preserve
+    math/tables/images exactly and a manual rewrite risks subtly altering
+    them. If the input is a question paper (filename ending in -qp.md), you
+    MUST call format_latex_as_exam on the resulting .tex file to convert it 
+    into the Overleaf exam class format before finishing.
+
+    If convert_latex_to_markdown reports that raw LaTeX blocks survived
+    (pandoc couldn't translate them, e.g. a raw tikzpicture), it gives you
+    the exact code and exact next steps - follow them precisely: call
+    generate_diagram with that exact code as latex_body (plus a complete
+    ground_truth), then replace_in_generated_file with old_text set to that
+    exact reported block and new_text set to whatever generate_diagram
+    returned. Never invent, guess, or substitute a *different* diagram (e.g.
+    an unrelated ER diagram in place of a lost tree/graph) - if
+    generate_diagram fails and you cannot recover the original diagram, say
+    so explicitly in your final report instead of fabricating a replacement;
+    a fabricated diagram is worse than a missing one because it looks
+    authoritative while being wrong.
+
+    Separately, if any image reference (in either direction) looks broken,
+    missing, or only vaguely described, call search_images with a query
+    matching its caption/context to try to resolve it to the correct real
+    image - don't leave a broken reference, and don't fabricate a
+    replacement either.
+
+    If a tool reports a failure (e.g. pandoc not installed, or a
+    compile/parse error), report that failure plainly - do not attempt to
+    work around it by producing the conversion yourself.
+  expected_output: >
+    A list of every file converted (input -> output path), and the exact
+    reported reason for any file that failed to convert. Note any raw
+    diagram code that was re-rendered into a real image (or, if it couldn't
+    be recovered, say so explicitly), and any image reference that was
+    resolved or found still broken.
+  agent: format_converter

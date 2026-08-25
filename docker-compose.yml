@@ -1,0 +1,75 @@
+version: '3.8'
+
+# YAML anchor for common service configurations to adhere to DRY principles
+x-klyra-common: &klyra-common
+  build: .
+  env_file:
+    - .env
+  environment:
+    - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+    - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+    - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-klyra}:${POSTGRES_PASSWORD:-klyrapass}@db:5432/${POSTGRES_DB:-klyradb}}
+    - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+  volumes:
+    - ./docs:/app/docs
+
+services:
+  web:
+    <<: *klyra-common
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      - redis
+      - db
+      - qdrant
+
+  worker:
+    <<: *klyra-common
+    entrypoint: []
+    command: celery -A klyra.celery_app worker --loglevel=${CELERY_LOGLEVEL:-info}
+    volumes:
+      - ./docs:/app/docs
+      # Mount docker socket for code execution validation (Docker-outside-of-Docker)
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - redis
+      - db
+      - qdrant
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-klyra}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-klyrapass}
+      - POSTGRES_DB=${POSTGRES_DB:-klyradb}
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  cli:
+    <<: *klyra-common
+    entrypoint: ["klyra"]
+    # Provide the CLI with docker socket access so it can trigger code validation if run directly via compose
+    volumes:
+      - ./docs:/app/docs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - db
+      - qdrant
+
+volumes:
+  postgres_data:
+  qdrant_data:

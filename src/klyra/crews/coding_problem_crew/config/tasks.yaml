@@ -1,0 +1,145 @@
+create_coding_problems_task:
+  description: >
+    Generate coding problems for subject "{subject}" in language
+    "{language}" with these requirements: week scope = {syllabus_scope};
+    source restriction = {source_filter}; difficulty = {difficulty};
+    PYQ-similar count = {pyq_similar_count}; leetcode_similar =
+    {leetcode_similar} ("yes" or "no"); include a reference solution in
+    the student-facing problems file = {include_reference} ("yes" or "no");
+    concepts to target = {concepts} (use these even if no files are
+    indexed); total number of problems = {num_questions}; public test
+    cases per problem = {public_test_count}; private test cases per
+    problem = {private_test_count}. Additional instructions from the
+    requester: {notes}
+
+    Coding generation does NOT require the syllabus index or ingested
+    theory. Call search_coding_sources for this subject (and the requested
+    week(s)) FIRST. If lab/assignment/problem-set/code files exist - any
+    format: md, pdf, source code, etc. - ground the problems in THOSE
+    files, not lecture theory. Theory slides in the same week folders are
+    only for concept names. If search_coding_sources finds nothing, that
+    is fine: write original problems from --concepts, --notes, the
+    language, and the tools below. Do not refuse to generate just because
+    nothing is indexed.
+
+    If pyq_similar_count > 0, OR if {notes} asks to follow PYQs, call
+    search_pyq (and include any coding PYQ files search_coding_sources
+    returned) and write NEW problems similar in concept/structure/
+    difficulty - never copy a statement verbatim; tag pyq_similar plus
+    which PYQ they're based on.
+
+    If leetcode_similar is "yes", OR if {notes}/{concepts} point at
+    LeetCode-style work, call search_leetcode with the concepts, the
+    subject name, and relevant wording from {notes} (including any PYQ
+    text the notes refer to). Inspect a title_slug if you need more
+    detail. Then write ORIGINAL problems in LeetCode format (title,
+    function/method signature, examples, constraints) inspired by the
+    matching patterns - never copy a LeetCode title, statement, examples,
+    or numbers. Tag those problems leetcode_similar: true.
+
+
+
+    For every problem, write: a clear problem statement (exact input
+    format, output format, constraints/bounds); an explanation ONLY if
+    genuinely needed; a hint ONLY if useful without giving the solution
+    away; 1-2 sample test cases in the statement; and a full draft test
+    set - exactly {public_test_count} public + {private_test_count}
+    private - including real edge cases.
+    CRITICAL RULE: Every sample test case (Example 1, Example 2, etc.) that you put in the problem statement MUST be included as the very first items in the draft public test set section. This ensures the validator will actually test and correct the examples if your hand-calculated expected outputs are wrong.
+
+    A reference solution is NOT required in the student-facing file.
+    Include a draft solution (marked NOT student-facing) only if
+    include_reference is "yes". You do not have a code execution tool.
+
+    ALWAYS call write_coding_package for this subject="{subject}" and
+    name="{name}" so the student package is real files, not just markdown:
+    docs/{subject}/generated/coding/{name}/README.md,
+    public/test_case_N/input.txt + output.txt,
+    private/test_case_N/input.txt + output.txt. (Do NOT pass a custom evaluation_script; Klyra provides a robust default runner).
+    If {notes} ask for this layout or extra files, follow those notes using 
+    write_coding_package and/or write_subject_file. For multiple problems, 
+    call write_coding_package once per problem with problem_subdir.
+  expected_output: >
+    For each problem, in markdown: MUST START with a YAML frontmatter block containing tags
+    (concept, week, language, marks, pyq_similar, leetcode_similar); a numbered heading;
+    the problem statement using standard LeetCode headers (e.g., "### Constraints", "### Example 1");
+    an explanation section if included; a hint section if included; then, clearly marked as 
+    NOT for the student-facing file, the full draft public+private test case sets for the 
+    validator to check; and a draft reference solution ONLY if include_reference was "yes".
+  agent: coding_problem_creator
+
+coding_discrepancy_review_task:
+  description: >
+    Review the coding problems above for subject "{subject}" (scope
+    {syllabus_scope}, language {language}). Flag: ambiguous or
+    under-specified problem statements (unclear I/O format, missing
+    constraints, unclear edge-case behavior). Do NOT flag a problem as
+    out-of-syllabus merely because the syllabus index is empty or was not
+    queried - coding generation does not require indexed theory. If
+    search_coding_sources finds real coding-problem files, flag a problem
+    that is a verbatim/near-verbatim copy of one of those files. For any
+    problem tagged pyq_similar, use search_pyq to check it's a *new*
+    problem. For any problem tagged leetcode_similar, use search_leetcode
+    if needed and flag a verbatim copy of a well-known LeetCode problem
+    (same title/examples/numbers). If include_reference is "no"
+    ({include_reference}), flag any student-facing full reference
+    solution. Also verify the requested mix: difficulty = {difficulty},
+    num_questions = {num_questions}, pyq_similar_count =
+    {pyq_similar_count}, leetcode_similar = {leetcode_similar},
+    public_test_count = {public_test_count}, private_test_count =
+    {private_test_count}. Do NOT execute or solve any code.
+  expected_output: >
+    A per-problem discrepancy verdict (wording/scope only) plus a
+    mix-compliance summary (difficulty / count / PYQ-similarity /
+    LeetCode-similar flag / test-case-counts / reference-solution policy:
+    met or not, with specifics).
+  agent: coding_discrepancy_reviewer
+
+validate_test_cases_task:
+  description: >
+    Independently validate the test cases for the coding problems above,
+    subject "{subject}", language {language}. For EVERY problem: read the
+    problem statement fresh and write your OWN reference solution in
+    {language} (the creator may not have included one - that is
+    intentional when include_reference is "no"; do not treat a missing
+    creator solution as an error). Call run_code with your solution against
+    the creator's draft test cases (both public and private). If any test
+    case fails against your independently-correct solution, that test case
+    (or the problem statement itself) has a real error - decide which, fix
+    it (rewrite the bad test case's expected output, or the ambiguous
+    statement detail causing the mismatch), and re-run run_code until every
+    test case actually passes against your solution. Also check the test
+    cases actually distinguish a correct solution from a plausible
+    incorrect one (e.g. an off-by-one, or a boundary condition) - if a
+    problem's test cases would all pass a subtly wrong solution, add a test
+    case that catches it, and validate that too. Never report a test case
+    or solution as correct without run_code actually confirming it passed;
+    if Docker/run_code is unavailable, say so plainly rather than assuming
+    correctness.    Keep your validated solutions in THIS report (testcases.md).
+    After the tests are final, call write_coding_package for subject="{subject}" name="{name}" with the validated public/private cases so docs/{subject}/generated/coding/{name}/public and private folders are up to date. (Do NOT pass a custom evaluation_script; Klyra provides a robust default runner).
+    CRITICAL MULTIPLE-PROBLEM RULES:
+    1. If there are multiple problems, you MUST pass the correct `problem_subdir` to write_coding_package (e.g., problem-1, problem-2) so the files aren't dumped in the root folder.
+    2. If you fixed a test case that was embedded as an example in the README, you MUST pass the corrected README via the `readme` parameter to write_coding_package so it stays consistent. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers.
+    3. You MUST call write_subject_file to write your verified reference solution code to a file named `solution.{language}` (e.g. solution.py, solution.c, solution.sh if bash) inside the problem's directory (e.g. `generated/coding/{name}/problem-1/solution.py` or `generated/coding/{name}/solution.py`). Do not put the reference solution in README.md.
+  expected_output: >
+    For every problem: the FINAL validated public and private test cases
+    (clearly separated, each with exact input and expected output), plus
+    YOUR independently-written reference solution in a fenced code block
+    (this file is the hidden answer key, not the student paper), plus a
+    short validation note per problem - confirmed correct as-is, or what
+    was wrong and what you fixed (bad test case, wrong expected output,
+    ambiguous statement, etc.) and why.
+  agent: test_case_validator
+
+finalize_coding_review_task:
+  description: >
+    Compare the discrepancy report against the independent test-case
+    validation report above for subject "{subject}". If validation found
+    and fixed a real error (bad test case, wrong expected output, ambiguous
+    statement) that the discrepancy report did not already flag, add it to
+    the issue list. Give one final overall verdict: ready to use as-is, or
+    needs fixes (with the consolidated list of what to fix).
+  expected_output: >
+    A short final summary: overall verdict + consolidated issue list (or
+    "no issues found").
+  agent: coding_discrepancy_reviewer

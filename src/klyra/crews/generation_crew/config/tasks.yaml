@@ -1,0 +1,128 @@
+create_qp_task:
+  description: >
+    Generate a question paper for subject "{subject}" with these
+    requirements: syllabus scope = {syllabus_scope}; source restriction =
+    {source_filter} (if not "any", call list_source_files first to resolve it
+    to an exact source_file, then pass source_file= to search_syllabus /
+    search_pyq / search_images - if nothing matches, say so instead of
+    ignoring the restriction); difficulty = {difficulty}; number of
+    PYQ-similar questions required = {pyq_similar_count}; concepts to target
+    = {concepts} (if "any": derive from syllabus when indexed, else from
+    the PYQ bank - never from the subject slug); question types and
+    counts = {question_types}; total number of questions = {num_questions}.
+    Additional instructions from the requester: {notes}
+
+    Call list_source_files first. If syllabus/parsed files exist, use
+    search_syllabus to ground every question in real indexed concepts for
+    the requested subject/week/source scope only - never invent syllabus
+    content. If the syllabus index is empty but PYQ files exist, that is
+    enough: call fetch_pyq_chunks (and search_pyq with query='any' or
+    wording taken from those chunks / {concepts} / {notes}) and write the
+    paper from the PYQ bank. Do not refuse. Do not guess the course from
+    the subject slug (e.g. do not treat "ct" as compiler theory). Tag week
+    as "pyq" when a question is sourced only from the PYQ bank. If both
+    syllabus and PYQ are empty, then say ingest is missing instead of
+    guessing. For applied/computational concepts (e.g. algorithm tracing,
+    mathematical derivations, data structure manipulations) - write an actual
+    problem with concrete data (a specific graph, specific numbers/values,
+    specific code logic), asking the student to derive/compute a specific
+    result. Do not reduce these to simple definition-recall questions when the
+    concept is inherently procedural - NAT questions especially should require
+    an actual computed answer, not a recalled fact. If pyq_similar_count > 0, OR if you are generating from the PYQ bank
+    because syllabus is empty, use fetch_pyq_chunks / search_pyq to find
+    real PYQs and write NEW questions that are similar in concept, structure,
+    and difficulty to them - never copy a PYQ verbatim or make only a
+    trivial wording change; tag which questions are PYQ-similar plus which
+    PYQ they were inspired by. Do not pass week= to search_pyq. For any question about a diagram-based concept (graph,
+    tree, BST, B-tree, ER diagram, architecture diagram, dependency diagram,
+    etc.), call search_images first - if there's a genuinely relevant match,
+    embed the returned markdown image directly under the question stem and
+    refer to it in the question text (e.g. "Given the B-tree shown
+    below..."). If no real match exists but the question needs a diagram
+    specific to this question's own data (e.g. "the B-tree after inserting
+    these exact values", "this exact schema and FDs as a table"), work out
+    the exact correct structure yourself first, then call generate_diagram
+    with LaTeX/TikZ to render it precisely - only do this once you already
+    know the structure is correct, since it will faithfully draw whatever
+    you give it, and always pass a complete ground_truth (every node/edge or
+    cell) since the review/solve agents cannot see the rendered image and
+    rely entirely on that text to verify and solve the question. If
+    generate_diagram is unavailable or fails to compile, write the question
+    as text-only rather than fabricating a diagram reference. If any
+    required parameter above is missing or unclear, state exactly what's
+    missing instead of guessing.
+  expected_output: >
+    The full question paper in markdown: numbered questions, each tagged
+    with type, concept, week, marks, and pyq_similar (plus the source PYQ
+    when true); MCQ/MSQ questions include lettered options; questions backed
+    by a diagram include the embedded markdown image (reused or generated).
+  agent: qp_creator
+
+discrepancy_review_task:
+  description: >
+    Review the question paper above for subject "{subject}" (scope
+    {syllabus_scope}). Flag ambiguous wording, structurally invalid options
+    (e.g. an MSQ with only one correct option, or an MCQ where two options
+    both look correct). If search_syllabus returns real entries for this
+    scope, confirm every question's concept/week is traceable there and
+    list any that are not as out-of-syllabus. If the syllabus index is
+    empty, do NOT refuse the review and do NOT flag out-of-syllabus for
+    that reason - call fetch_pyq_chunks / search_pyq and check questions
+    are grounded in the PYQ bank instead. For any question with an
+    embedded diagram, you cannot see the rendered image - call search_images
+    with a query matching its caption/topic to retrieve its full indexed
+    ground truth (this works for both reused and freshly-generated diagrams),
+    and use that text to check the question is actually answerable and
+    unambiguous from the diagram; if search_images returns nothing useful for
+    a diagram-based question, flag that as a discrepancy rather than assuming
+    the diagram is fine. For any question tagged pyq_similar, use search_pyq
+    to check it's genuinely a *new* question
+    (different wording/numbers/scenario) and not a verbatim or near-verbatim
+    copy of the PYQ it's based on - flag it if it is. Also verify the
+    requested mix was met: difficulty = {difficulty}, question_types =
+    {question_types}, num_questions = {num_questions}, pyq_similar_count =
+    {pyq_similar_count}. Do not solve the questions yourself.
+  expected_output: >
+    A per-question discrepancy verdict plus a mix-compliance summary
+    (difficulty / types / count / PYQ-similarity: met or not, with
+    specifics).
+  agent: discrepancy_reviewer
+
+solve_verify_task:
+  description: >
+    Independently solve every question in the paper above for subject
+    "{subject}" from first principles - do not trust any answer key already
+    in the paper. Use search_syllabus when it has entries; otherwise use
+    fetch_pyq_chunks / search_pyq. Ground each solution in real source
+    material and cite the concept/week (or PYQ source) you used. Do not
+    refuse to solve because the syllabus index is empty if PYQs exist. For any
+    question with an embedded diagram, you cannot see the rendered image -
+    call search_images with a query matching its caption/topic to retrieve
+    its full indexed ground truth (nodes/edges/cells) and solve from that
+    text, not from assumptions about what the image probably shows; if
+    search_images returns nothing useful, say the question can't be
+    independently verified rather than guessing. For
+    computational/procedural questions (algorithm tracing, numerical
+    computations, derivations, etc.), actually perform the derivation step
+    by step (e.g. trace the loops, apply the algorithm step by step, show the
+    intermediate states) and show that work - a bare final answer is not
+    sufficient for these. If a
+    question has more than one valid answer, or none, say so explicitly.
+  expected_output: >
+    A definitive answer key: for every question, the correct option(s)/value,
+    the full derivation/working for computational questions, and a short
+    justification citing the concept/week used.
+  agent: solver_verifier
+
+finalize_review_task:
+  description: >
+    Compare the discrepancy report against the independent answer key above
+    for subject "{subject}". If the answer key found more than one valid
+    answer (or none) for a question that the discrepancy report did not
+    already flag, add it to the issue list. Give one final overall verdict:
+    ready to use as-is, or needs fixes (with the consolidated list of what to
+    fix).
+  expected_output: >
+    A short final summary: overall verdict + consolidated issue list (or
+    "no issues found").
+  agent: discrepancy_reviewer

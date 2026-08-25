@@ -1,0 +1,52 @@
+revise_qp_task:
+  description: >
+    Revise the question paper for subject "{subject}" below based on the
+    discrepancy report and independent answer key also below, AND on these
+    specific manual instructions from the requester (apply these regardless
+    of whether the automated review flagged the same thing - manual
+    instructions are authoritative): {manual_instructions}
+
+    Also fix every issue the automated review flagged: rewrite ambiguous
+    questions/options, correct any out-of-syllabus question (replace it with
+    an in-syllabus one on the same concept/week scope if possible, else drop
+    it and note the drop), fix structurally invalid options (e.g. more than
+    one defensible correct answer for an MCQ), and correct the requested mix
+    (difficulty / question types / count / PYQ-similarity) if the final
+    summary says it wasn't met. Keep every question not covered by either
+    the manual instructions or the automated review exactly as-is. Use
+    search_syllabus when it has entries; if the syllabus is empty, ground
+    replacements in fetch_pyq_chunks / search_pyq. Never invent syllabus
+    content and never guess the course from the subject slug. Do not treat
+    "syllabus index missing" as a reason to refuse revision when PYQs exist.
+
+    If a replacement question concerns a diagram-based concept (graph, tree,
+    BST, B-tree, ER diagram, dependency diagram, etc.), call search_images
+    first and embed a genuinely relevant result; if none exists and the
+    diagram is specific to this question's own data, work out the correct
+    structure yourself and call generate_diagram (LaTeX/TikZ) to render it,
+    always passing a complete ground_truth (every node/edge/cell) since
+    review/solve agents cannot see the rendered image - never fabricate a
+    diagram reference, and never guess the structure before calling
+    generate_diagram. If a question is flagged as a too-close PYQ copy,
+    rewrite it to be similar in concept/difficulty but never verbatim.
+
+    --- ORIGINAL QUESTION PAPER ---
+    {qp_content}
+
+    --- DISCREPANCY REPORT ---
+    {discrepancy_content}
+
+    --- INDEPENDENT ANSWER KEY ---
+    {answer_key_content}
+
+    --- FINAL SUMMARY (CROSS-CHECKED ISSUES) ---
+    {final_summary_content}
+  expected_output: >
+    The fully revised question paper in the same markdown format as the
+    original (numbered questions, type/concept/week/marks/pyq_similar tags,
+    lettered options for MCQ/MSQ, unless a manual instruction asked for a
+    different format like a table for a specific question), followed by a
+    short changelog listing exactly which questions changed, whether each
+    change came from a manual instruction or the automated review, and why.
+  agent: qp_reviser
+  output_file: "docs/{subject}/generated/{qp_name}-qp-revised.md"

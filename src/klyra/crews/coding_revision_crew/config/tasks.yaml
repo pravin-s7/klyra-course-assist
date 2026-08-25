@@ -1,0 +1,59 @@
+revise_coding_problems_task:
+  description: >
+    Revise the coding problems for subject "{subject}" (language
+    {language}) below based on the discrepancy report and test-case
+    validation report also below, AND on these specific manual instructions
+    from the requester (apply these regardless of whether the automated
+    review flagged the same thing - manual instructions are authoritative):
+    {manual_instructions}
+
+    Also fix every issue the automated review flagged: rewrite ambiguous
+    problem statements, replace any problem that copied a PYQ/LeetCode/
+    lab file verbatim, and fix anything the validator's execution found
+    wrong (a bad test case, wrong expected output, a solution that didn't
+    actually pass). Keep every problem not covered by either the manual
+    instructions or the automated review exactly as-is.
+    Use search_coding_sources, search_pyq, and search_leetcode to ground any
+    new/replacement content when those sources exist - you do not need a
+    syllabus index. If you change a test case's expected output or a
+    reference solution, use run_code to confirm the fix actually passes
+    before finalizing - if Docker/run_code is unavailable, say so and note
+    the fix is unverified.
+
+    Manual instructions are authoritative for filesystem layout. You HAVE
+    write permission under docs/{subject}/generated/ only. When {manual_instructions}
+    ask for README.md, public/test_case_N/input.txt+output.txt,
+    private/test_case_N/..., and/or evaluation_script, you MUST actually
+    create those folders and files with write_coding_package (and
+    write_subject_file for any extra path). Do not only describe the layout
+    in markdown - the files must exist on disk.
+
+    CRITICAL MULTIPLE-PROBLEM RULES:
+    1. If the problem you are revising is part of a multiple-problem package, you MUST pass the correct `problem_subdir` to write_coding_package (e.g., problem-1, problem-2) so the files aren't dumped in the root folder.
+    2. If you fixed a test case that was embedded as an example in the README, you MUST pass the corrected README via the `readme` parameter to write_coding_package so it stays consistent. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers.
+    3. You MUST call write_subject_file to write your verified reference solution code to a file named `solution.{language}` (e.g. solution.py, solution.c) inside the problem's directory (e.g. `generated/coding/{name}/problem-1/solution.py` or `generated/coding/{name}/solution.py`). Do not put the reference solution in README.md.
+    Subject="{subject}", name="{name}".
+    Subject="{subject}", name="{name}".
+
+    --- ORIGINAL PROBLEMS ---
+    {problems_content}
+
+    --- DISCREPANCY REPORT ---
+    {discrepancy_content}
+
+    --- TEST-CASE VALIDATION REPORT ---
+    {testcases_content}
+
+    --- FINAL SUMMARY (CROSS-CHECKED ISSUES) ---
+    {final_summary_content}
+  expected_output: >
+    The fully revised set of coding problems in the same markdown format as
+    the original (numbered problems, concept/week/language/marks/
+    pyq_similar/leetcode_similar tags, problem statement/explanation/hint/
+    sample test cases; a reference solution only if the original included one),
+    followed by a short changelog listing exactly which problems changed,
+    whether each change came from a manual instruction or the automated
+    review, and (for any test-case/solution fix) whether run_code confirmed
+    it. Also state the on-disk package path that write_coding_package wrote.
+  agent: coding_problem_reviser
+  output_file: "docs/{subject}/generated/coding/{name}-problems-revised.md"

@@ -1,0 +1,27 @@
+prepare_teaching_material_task:
+  description: >
+    Prepare teaching material for a live session on subject "{subject}",
+    scope = {syllabus_scope}, focus concepts = {concepts} (or the full
+    scope's content if "any"). Instructor's notes on what they want:
+    {notes}
+
+    Use fetch_parsed_chunks and search_syllabus to ground every section in
+    real indexed content for this subject/week scope - never invent
+    material beyond what's indexed; if the scope has a gap (use
+    report_syllabus_gaps), say so instead of filling it in. Structure the
+    material as: (1) a short session outline, with rough time allocation if
+    the notes suggest a duration; (2) for each concept, a clear explanation
+    grounded in the source material; (3) at least one worked example per
+    major concept; (4) a real diagram where one genuinely helps
+    (search_images first; only call generate_diagram for a diagram specific
+    to an example you're constructing and whose exact structure you already
+    know - never fabricate one); (5) a short set of discussion/check-in
+    questions for the end of the session. Follow the instructor's notes on
+    emphasis, depth, and format even where they add to or reshape this
+    default structure - the notes take priority over the default structure.
+  expected_output: >
+    Complete teaching material in markdown: session outline, per-concept
+    explanations with worked examples and diagrams where relevant, and a
+    short set of wrap-up discussion questions.
+  agent: teaching_material_preparer
+  output_file: "docs/{subject}/generated/teaching/{session_name}-teaching-material.md"

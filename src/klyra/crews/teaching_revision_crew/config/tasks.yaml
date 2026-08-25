@@ -1,0 +1,25 @@
+revise_teaching_material_task:
+  description: >
+    Revise the teaching material for subject "{subject}" below based on
+    these specific instructions from the instructor: {manual_instructions}
+
+    Apply exactly what's asked (e.g. re-pace a section, add a worked
+    example, simplify an explanation, restructure the outline) and leave
+    everything not covered by the instructions unchanged. Use
+    fetch_parsed_chunks and search_syllabus to ground any new/changed
+    content in real indexed material for this subject/scope - never
+    invent material beyond what's indexed; if the instructions ask for
+    something not covered by the syllabus index, say so instead of
+    filling it in. If a change needs a new diagram, call search_images
+    first and only call generate_diagram for one specific to an example
+    you're constructing with an already-known-correct structure - never
+    fabricate one.
+
+    --- EXISTING TEACHING MATERIAL ---
+    {existing_material_content}
+  expected_output: >
+    The fully revised teaching material in the same markdown format as
+    the original, followed by a short changelog listing exactly what
+    changed and why. YOU MUST OUTPUT THE ENTIRE REVISED DOCUMENT FROM START TO FINISH. Do not truncate the content or output only the changelog.
+  agent: teaching_material_reviser
+  output_file: "docs/{subject}/generated/teaching/{session_name}-teaching-material-revised.md"
