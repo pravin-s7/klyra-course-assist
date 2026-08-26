@@ -241,7 +241,11 @@ class WriteCodingPackageInput(BaseModel):
     )
     problem_subdir: str | None = Field(
         default=None,
-        description="Optional subfolder under the package when the set has multiple problems, e.g. problem_1",
+        description="Optional subfolder under the package when the set has multiple problems, e.g. problem-1",
+    )
+    reference_solution: str | None = Field(
+        default=None,
+        description="The reference solution code. If provided, it will be saved as solution.{language} in the same folder.",
     )
 
 
@@ -268,6 +272,7 @@ class WriteCodingPackageTool(BaseTool):
         private_tests: list | None = None,
         evaluation_script_filename: str | None = None,
         problem_subdir: str | None = None,
+        reference_solution: str | None = None,
     ) -> str:
         try:
             fs.validate_subject(subject)
@@ -285,6 +290,11 @@ class WriteCodingPackageTool(BaseTool):
 
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "README.md").write_text(readme or "")
+        
+        if reference_solution:
+            ext_map = {"python": ".py", "java": ".java", "c": ".c", "cpp": ".cpp", "bash": ".sh"}
+            ext = ext_map.get(language.strip().lower(), ".txt")
+            (pkg / f"solution{ext}").write_text(reference_solution)
 
         def _as_cases(raw: list | None) -> list[TestCaseFiles]:
             out: list[TestCaseFiles] = []

@@ -24,8 +24,7 @@ create_coding_problems_task:
 
     If pyq_similar_count > 0, OR if {notes} asks to follow PYQs, call
     search_pyq (and include any coding PYQ files search_coding_sources
-    returned) and write NEW problems similar in concept/structure/
-    difficulty - never copy a statement verbatim; tag pyq_similar plus
+    returned) and write NEW problems testing the same underlying concept but using a SUBSTANTIALLY DIFFERENT problem scenario - never copy a PYQ verbatim and NEVER just change numbers, variable names, or make slight wording tweaks; tag pyq_similar plus
     which PYQ they're based on.
 
     If leetcode_similar is "yes", OR if {notes}/{concepts} point at
@@ -33,9 +32,8 @@ create_coding_problems_task:
     subject name, and relevant wording from {notes} (including any PYQ
     text the notes refer to). Inspect a title_slug if you need more
     detail. Then write ORIGINAL problems in LeetCode format (title,
-    function/method signature, examples, constraints) inspired by the
-    matching patterns - never copy a LeetCode title, statement, examples,
-    or numbers. Tag those problems leetcode_similar: true.
+    function/method signature, examples, constraints) testing the same concepts but using a SUBSTANTIALLY DIFFERENT problem scenario - never copy a LeetCode title, statement, examples,
+    or numbers, and NEVER just change variables or make slight tweaks. Tag those problems leetcode_similar: true.
 
 
 
@@ -58,7 +56,8 @@ create_coding_problems_task:
     private/test_case_N/input.txt + output.txt. (Do NOT pass a custom evaluation_script; Klyra provides a robust default runner).
     If {notes} ask for this layout or extra files, follow those notes using 
     write_coding_package and/or write_subject_file. For multiple problems, 
-    call write_coding_package once per problem with problem_subdir.
+    call write_coding_package once per problem with a consistent problem_subdir (e.g. problem-1, problem-2).
+    If you write a reference solution, pass it to write_coding_package via the `reference_solution` parameter so it is saved in the same directory. Do not use write_subject_file for the solution.
   expected_output: >
     For each problem, in markdown: MUST START with a YAML frontmatter block containing tags
     (concept, week, language, marks, pyq_similar, leetcode_similar); a numbered heading;

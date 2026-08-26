@@ -8,6 +8,8 @@ def run_revision(subject: str, qp_name: str, notes: str | None = None) -> Any:
     from klyra.crews.revision_crew.revision_crew import RevisionCrew
     from klyra.utils import fs
 
+    fs.check_subject_exists(subject)
+
     slug = fs.slugify(qp_name)
     generated = fs.generated_dir(subject)
 

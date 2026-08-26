@@ -151,11 +151,11 @@ def parse_file_to_text(path: Path) -> tuple[str, bool, list[ExtractedImage]]:
 
 
 class DocumentParserInput(BaseModel):
-    subject: str = Field(..., description="Subject slug, e.g. 'data-structures'")
-    week: int | None = Field(
-        default=None, description="Limit parsing to a single week (1-12). Omit to parse everything."
-    )
-    force: bool = Field(default=False, description="Re-parse files even if unchanged since last run.")
+    subject: str = Field(..., description="The subject ID (e.g. dbms, se, ml)")
+    week: int | None = Field(None, description="The week number to parse. None means all weeks.")
+    categories_filter: str | None = Field(None, description="Comma-separated categories to filter by (e.g. pyq,transcript)")
+    file_path: str | None = Field(None, description="A specific file path to parse.")
+    force: bool = Field(False, description="Whether to re-parse already ingested files.")
 
 
 class DocumentParserTool(BaseTool):
@@ -172,73 +172,86 @@ class DocumentParserTool(BaseTool):
     )
     args_schema: Type[BaseModel] = DocumentParserInput
 
-    def _run(self, subject: str, week: int | None = None, force: bool = False) -> str:
-        manifest = fs.load_manifest(subject)
-        files = fs.discover_subject_files(subject, week=week)
-
-        parsed, skipped, degraded, failed = [], [], [], []
-        total_images = 0
-
-        for source in files:
-            key = str(source.path)
-            file_hash = source.sha256()
-            if not force and manifest.get(key, {}).get("hash") == file_hash:
-                skipped.append(key)
-                continue
-
-            try:
-                text, was_degraded, images = parse_file_to_text(source.path)
-            except Exception as exc:  # noqa: BLE001 - surfaced in report, not raised
-                failed.append(f"{key}: {exc}")
-                continue
-
-            if not text.strip():
-                failed.append(f"{key}: parsed to empty text")
-                continue
-
-            chunks = [
-                {
-                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{key}::{i}")),
-                    "text": chunk,
-                    "metadata": {
-                        "subject": source.subject,
-                        "week": source.week or 0,
-                        "category": source.category,
-                        "source_file": key,
-                    },
-                }
-                for i, chunk in enumerate(_chunk_text(text))
-            ]
-
-            target_collection = (
-                vector_store.pyq_collection_name(subject)
-                if source.category == "pyq"
-                else vector_store.parsed_collection_name(subject)
+    def _run(
+        self, 
+        subject: str, 
+        week: int | None = None, 
+        categories_filter: str | None = None, 
+        file_path: str | None = None,
+        force: bool = False
+    ) -> str:
+        try:
+            manifest = fs.load_manifest(subject)
+            categories = categories_filter.split(",") if categories_filter else None
+            files = fs.discover_subject_files(
+                subject, week=week, categories=categories, file_path=file_path
             )
-            vector_store.add_chunks(target_collection, chunks)
-
-            if images and source.category != "pyq":
-                total_images += save_and_index_images(
-                    subject=subject, source_file=key, week=source.week, images=images, parsed_text=text
+    
+            parsed, skipped, degraded, failed = [], [], [], []
+            total_images = 0
+    
+            for source in files:
+                key = str(source.path)
+                file_hash = source.sha256()
+                if not force and manifest.get(key, {}).get("hash") == file_hash:
+                    skipped.append(key)
+                    continue
+    
+                try:
+                    text, was_degraded, images = parse_file_to_text(source.path)
+                except Exception as exc:  # noqa: BLE001 - surfaced in report, not raised
+                    failed.append(f"{key}: {exc}")
+                    continue
+    
+                if not text.strip():
+                    failed.append(f"{key}: parsed to empty text")
+                    continue
+    
+                chunks = [
+                    {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{key}::{i}")),
+                        "text": chunk,
+                        "metadata": {
+                            "subject": source.subject,
+                            "week": source.week or 0,
+                            "category": source.category,
+                            "source_file": key,
+                        },
+                    }
+                    for i, chunk in enumerate(_chunk_text(text))
+                ]
+    
+                target_collection = (
+                    vector_store.pyq_collection_name(subject)
+                    if source.category == "pyq"
+                    else vector_store.parsed_collection_name(subject)
                 )
-
-            manifest[key] = {"hash": file_hash, "chunks": len(chunks)}
-            parsed.append(key)
-            if was_degraded:
-                degraded.append(key)
-
-        fs.save_manifest(subject, manifest)
-
-        lines = [
-            f"Parsed {len(parsed)} file(s), skipped {len(skipped)} unchanged, {len(failed)} failed."
-        ]
-        if total_images:
-            lines.append(f"Extracted {total_images} diagram(s)/figure(s) for use in generated questions.")
-        if degraded:
-            lines.append(
-                "Degraded (images/diagrams not understood - install LibreOffice "
-                "and/or set GEMINI_API_KEY for full parsing): " + ", ".join(degraded)
-            )
-        if failed:
-            lines.append("Failed: " + "; ".join(failed))
-        return "\n".join(lines)
+                vector_store.add_chunks(target_collection, chunks)
+    
+                if images and source.category != "pyq":
+                    total_images += save_and_index_images(
+                        subject=subject, source_file=key, week=source.week, images=images, parsed_text=text
+                    )
+    
+                manifest[key] = {"hash": file_hash, "chunks": len(chunks)}
+                parsed.append(key)
+                if was_degraded:
+                    degraded.append(key)
+    
+            fs.save_manifest(subject, manifest)
+    
+            lines = [
+                f"Parsed {len(parsed)} file(s), skipped {len(skipped)} unchanged, {len(failed)} failed."
+            ]
+            if total_images:
+                lines.append(f"Extracted {total_images} diagram(s)/figure(s) for use in generated questions.")
+            if degraded:
+                lines.append(
+                    "Degraded (images/diagrams not understood - install LibreOffice "
+                    "and/or set GEMINI_API_KEY for full parsing): " + ", ".join(degraded)
+                )
+            if failed:
+                lines.append("Failed: " + "; ".join(failed))
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error executing parser: {e}"

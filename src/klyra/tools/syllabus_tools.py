@@ -47,27 +47,30 @@ class ListSourceFilesTool(BaseTool):
     args_schema: Type[BaseModel] = ListSourceFilesInput
 
     def _run(self, subject: str, week: int | None = None) -> str:
-        where = {"week": week} if week is not None else None
-        files = vector_store.list_distinct_metadata_values(
-            vector_store.parsed_collection_name(subject), "source_file", where=where
-        )
-        pyq_files = vector_store.list_distinct_metadata_values(
-            vector_store.pyq_collection_name(subject), "source_file"
-        )
-        if not files and not pyq_files:
-            return "No indexed source files found - has this subject been ingested yet?"
-        lines = []
-        if files:
-            lines.append("Syllabus/parsed files:")
-            lines.extend(f"- {f}" for f in files)
-        else:
-            lines.append("No syllabus/parsed files indexed.")
-        if pyq_files:
-            lines.append("PYQ files:")
-            lines.extend(f"- {f}" for f in pyq_files)
-        else:
-            lines.append("No PYQ files indexed.")
-        return "\n".join(lines)
+        try:
+            where = {"week": week} if week is not None else None
+            files = vector_store.list_distinct_metadata_values(
+                vector_store.parsed_collection_name(subject), "source_file", where=where
+            )
+            pyq_files = vector_store.list_distinct_metadata_values(
+                vector_store.pyq_collection_name(subject), "source_file"
+            )
+            if not files and not pyq_files:
+                return "No indexed source files found - has this subject been ingested yet?"
+            lines = []
+            if files:
+                lines.append("Syllabus/parsed files:")
+                lines.extend(f"- {f}" for f in files)
+            else:
+                lines.append("No syllabus/parsed files indexed.")
+            if pyq_files:
+                lines.append("PYQ files:")
+                lines.extend(f"- {f}" for f in pyq_files)
+            else:
+                lines.append("No PYQ files indexed.")
+            return "\n".join(lines)
+        finally:
+            vector_store.close_client()
 
 
 class FetchParsedChunksInput(BaseModel):

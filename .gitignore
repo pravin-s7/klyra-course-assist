@@ -9,6 +9,8 @@ __pycache__/
 .xdg-data/
 tests/
 .cursor/
+.memories/
+.db/
 .qdrant/
 docker/
 CLIENT_APP_README.md

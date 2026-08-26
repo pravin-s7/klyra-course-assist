@@ -60,7 +60,27 @@ _SUPPORTED_LANGUAGES_HELP = "python, java, c, cpp, bash"
 def _cmd_ingest(args: argparse.Namespace) -> int:
     from klyra.services.ingestion_service import run_ingestion
 
-    run_ingestion(subject=args.subject, week=args.week, force=args.force)
+    categories = []
+    if args.pyq:
+        categories.append("pyq")
+    if args.transcript:
+        categories.append("transcript")
+    if args.additional:
+        categories.append("additional")
+    if args.week is not None:
+        categories.append("week")
+        
+    if not categories:
+        categories = None  # indicates all
+
+    run_ingestion(
+        subject=args.subject, 
+        week=args.week, 
+        categories=categories, 
+        file_path=args.file,
+        delete_file=args.delete_file,
+        force=args.force
+    )
     return 0
 
 
@@ -167,27 +187,26 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_delete_index(args: argparse.Namespace) -> int:
-    from klyra.tools import vector_store
+def _cmd_voice(args: argparse.Namespace) -> int:
+    import asyncio
 
-    where = {}
-    if args.source_file:
-        where["source_file"] = args.source_file
-    
-    if not where:
-        print("Error: Must specify at least one condition (e.g. --source-file)")
-        return 1
+    try:
+        from klyra.voice.orchestrator import VoiceOrchestrator
+        from klyra.voice.transport import PyAudioTransport
+    except ImportError as exc:
+        raise SystemExit(
+            "Voice dependencies not installed. Run:\n"
+            "  sudo apt install portaudio19-dev   # system library\n"
+            "  pip install -e '.[voice]'          # Python package\n"
+            f"\nDetails: {exc}"
+        ) from exc
 
-    for name_func in [
-        vector_store.parsed_collection_name,
-        vector_store.syllabus_collection_name,
-        vector_store.pyq_collection_name,
-        vector_store.images_collection_name,
-    ]:
-        name = name_func(args.subject)
-        vector_store.delete_by_metadata(name, where)
-        
-    print(f"Deleted entries from {args.subject} collections where {where}")
+    transport = PyAudioTransport()
+    orchestrator = VoiceOrchestrator(transport=transport, voice_name=args.voice)
+    try:
+        asyncio.run(orchestrator.run())
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -195,10 +214,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="klyra")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_ingest = sub.add_parser("ingest", help="Parse + index a subject's source docs (ingestion phase)")
+    p_ingest = sub.add_parser("ingest", help="Process and vectorize lecture documents")
     p_ingest.add_argument("--subject", required=True)
     p_ingest.add_argument("--week", type=int, default=None)
-    p_ingest.add_argument("--force", action="store_true")
+    p_ingest.add_argument("--pyq", action="store_true", help="Include PYQ folders")
+    p_ingest.add_argument("--transcript", action="store_true", help="Include transcripts folders")
+    p_ingest.add_argument("--additional", action="store_true", help="Include additional resources folders")
+    p_ingest.add_argument("--file", type=str, help="Ingest a specific file by path")
+    p_ingest.add_argument("--delete-file", type=str, help="Delete a specific file from the index")
+    p_ingest.add_argument("--force", action="store_true", help="Force re-parsing unchanged files")
     p_ingest.set_defaults(func=_cmd_ingest)
 
     p_generate = sub.add_parser(
@@ -371,10 +395,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--reload", action="store_true", help="Auto-reload on code changes (dev only)")
     p_serve.set_defaults(func=_cmd_serve)
 
-    p_delete_index = sub.add_parser("delete-index", help="Delete indexed entries by metadata (e.g. by file path)")
-    p_delete_index.add_argument("--subject", required=True)
-    p_delete_index.add_argument("--source-file", required=True, help="Exact path of the source file to delete from index")
-    p_delete_index.set_defaults(func=_cmd_delete_index)
+    p_voice = sub.add_parser(
+        "voice",
+        help="Start a conversational voice session powered by Gemini Live API",
+    )
+    p_voice.add_argument(
+        "--voice",
+        default=None,
+        help='Voice name (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr). '
+             'Default: KLYRA_VOICE_NAME env var or "Puck"',
+    )
+    p_voice.set_defaults(func=_cmd_voice)
 
     return parser
 

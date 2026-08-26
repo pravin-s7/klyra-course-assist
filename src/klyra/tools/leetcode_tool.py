@@ -327,7 +327,7 @@ class SearchLeetCodeInput(BaseModel):
     difficulty: str | None = Field(
         default=None, description="Optional: Easy, Medium, or Hard"
     )
-    limit: int = Field(default=10, ge=1, le=20)
+    limit: int = Field(default=20, ge=1, le=50)
     title_slug: str | None = Field(
         default=None,
         description="Optional: a specific LeetCode slug (e.g. two-sum) to inspect more closely",
@@ -349,7 +349,7 @@ class SearchLeetCodeTool(BaseTool):
         self,
         query: str = "",
         difficulty: str | None = None,
-        limit: int = 10,
+        limit: int = 20,
         title_slug: str | None = None,
     ) -> str:
         return search_leetcode_problems(

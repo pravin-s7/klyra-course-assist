@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0", "httpx>=0.27.0"]
+voice = ["pyaudio>=0.2.14"]
 
 [project.scripts]
 klyra = "klyra.cli:main"

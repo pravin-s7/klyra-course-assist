@@ -56,6 +56,16 @@ def get_client() -> QdrantClient:
     return client
 
 
+def close_client() -> None:
+    try:
+        client = get_client()
+        client.close()
+    except Exception:
+        pass
+    finally:
+        get_client.cache_clear()
+
+
 @lru_cache(maxsize=1)
 def get_embedding_function():
     from chromadb.utils import embedding_functions
@@ -134,13 +144,13 @@ def query(
         must_conditions = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in where.items()]
         query_filter = Filter(must=must_conditions)
         
-    results = client.search(
+    results = client.query_points(
         collection_name=collection_name,
-        query_vector=query_emb,
+        query=query_emb,
         limit=n_results,
         query_filter=query_filter,
         with_payload=True
-    )
+    ).points
     
     matches = []
     for hit in results:
@@ -148,6 +158,21 @@ def query(
         doc = meta.pop("_document", "")
         matches.append({"id": str(hit.id), "text": doc, "metadata": meta, "distance": hit.score})
     return matches
+
+
+def delete_by_source_file(collection_name: str, source_file: str) -> None:
+    client = get_client()
+    if not client.collection_exists(collection_name):
+        return
+        
+    query_filter = Filter(
+        must=[FieldCondition(key="source_file", match=MatchValue(value=source_file))]
+    )
+    
+    client.delete(
+        collection_name=collection_name,
+        points_selector=query_filter
+    )
 
 
 def get_by_metadata(collection_name: str, where: dict | None = None, limit: int = 20) -> list[dict]:

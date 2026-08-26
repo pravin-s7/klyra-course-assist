@@ -41,6 +41,11 @@ def run_coding_generation(
     from klyra.crews.coding_problem_crew.coding_problem_crew import CodingProblemCrew
     from klyra.utils import fs
 
+    fs.check_subject_exists(subject)
+
+    if not fs.subject_dir(subject).exists():
+        raise CodingInputError(f"Subject '{subject}' does not exist in docs/. Please run ingest first.")
+
     (fs.generated_dir(subject) / "coding").mkdir(parents=True, exist_ok=True)
     inputs = {
         "subject": subject,
@@ -64,6 +69,8 @@ def run_coding_generation(
 def run_coding_revision(subject: str, name: str, language: str, notes: str | None = None) -> Any:
     from klyra.crews.coding_revision_crew.coding_revision_crew import CodingRevisionCrew
     from klyra.utils import fs
+
+    fs.check_subject_exists(subject)
 
     slug = fs.slugify(name)
     coding_dir = fs.generated_dir(subject) / "coding"

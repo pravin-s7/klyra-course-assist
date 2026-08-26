@@ -27,6 +27,8 @@ def run_generation(
 
     from klyra.crews.generation_crew.generation_crew import GenerationCrew
     from klyra.utils import fs
+
+    fs.check_subject_exists(subject)
     from klyra.utils.parsing import parse_type_counts, parse_week_scope
 
     if type_counts:
@@ -41,6 +43,9 @@ def run_generation(
             "generate needs either type_counts (e.g. 'MCQ:5,MSQ:3,NAT:2') or both types and num_questions."
         )
 
+    if not fs.subject_dir(subject).exists():
+        raise GenerationInputError(f"Subject '{subject}' does not exist in docs/. Please run ingest first.")
+
     fs.generated_dir(subject).mkdir(parents=True, exist_ok=True)
     inputs = {
         "subject": subject,
@@ -54,4 +59,15 @@ def run_generation(
         "num_questions": resolved_num_questions,
         "notes": notes or "(none)",
     }
-    return GenerationCrew().crew().kickoff(inputs=inputs)
+    result = GenerationCrew().crew().kickoff(inputs=inputs)
+    
+    # Validation: Ensure the generation didn't fail due to empty context
+    qp_file = fs.generated_dir(subject) / f"{fs.slugify(qp_name)}-qp.md"
+    if qp_file.exists() and len(qp_file.read_text().strip()) < 150:
+        raise GenerationInputError(
+            f"Generation failed: The generated file is suspiciously short. "
+            f"This usually means the vector store returned no context for the requested scope ({scope}). "
+            f"Please ensure you have ingested content for this scope before generating."
+        )
+        
+    return result

@@ -60,7 +60,7 @@ def validate_subject(subject: str) -> str:
             f"Invalid subject {subject!r}: must contain only letters, digits, "
             "'-' and '_' (it's used to build a filesystem path)."
         )
-    return subject
+    return subject.lower()
 
 
 def week_dir_name(week: int) -> str:
@@ -71,6 +71,12 @@ def week_dir_name(week: int) -> str:
 
 def subject_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
     return root / validate_subject(subject)
+
+
+def check_subject_exists(subject: str, root: Path = DOCS_ROOT) -> None:
+    path = subject_dir(subject, root)
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"Subject directory does not exist: {path}. Please create it manually before running tools.")
 
 
 def week_dir(subject: str, week: int, root: Path = DOCS_ROOT) -> Path:
@@ -142,34 +148,88 @@ def missing_weeks(subject: str, root: Path = DOCS_ROOT) -> list[int]:
 
 
 def discover_subject_files(
-    subject: str, root: Path = DOCS_ROOT, week: int | None = None
+    subject: str, 
+    week: int | None = None, 
+    categories: list[str] | None = None,
+    file_path: str | None = None
 ) -> list[SourceFile]:
-    sdir = subject_dir(subject, root)
-    if not sdir.exists():
-        raise FileNotFoundError(f"No such subject folder: {sdir}")
+    """Find all ingestible documents for a subject, optionally filtered by week and categories."""
+    base = subject_dir(subject)
+    sources = []
 
-    found: list[SourceFile] = []
-    weeks_to_scan = [week] if week is not None else range(1, NUM_WEEKS + 1)
-    for w in weeks_to_scan:
-        wdir = week_dir(subject, w, root)
-        if wdir.exists():
-            found.extend(
-                SourceFile(p, subject, w, "week") for p in sorted(wdir.rglob("*")) if is_supported_file(p)
-            )
+    if file_path:
+        # User requested a specific file
+        path = Path(file_path)
+        if path.is_file():
+            # Try to infer week and category from the path
+            inferred_category = "week"
+            inferred_week = None
+            parts = path.parts
+            
+            if "pyq" in parts:
+                inferred_category = "pyq"
+            elif "transcripts" in parts:
+                inferred_category = "transcript"
+            elif "additional" in parts:
+                inferred_category = "additional"
+                
+            for part in parts:
+                if part.startswith("week_"):
+                    try:
+                        inferred_week = int(part.split("_")[1])
+                    except ValueError:
+                        pass
 
-    if week is None:
-        for dir_fn, category in (
-            (additional_dir, "additional"),
-            (pyq_dir, "pyq"),
-            (transcripts_dir, "transcript"),
-        ):
-            d = dir_fn(subject, root)
-            if d.exists():
-                found.extend(
-                    SourceFile(p, subject, None, category) for p in sorted(d.rglob("*")) if is_supported_file(p)
-                )
+            sources.append(SourceFile(
+                path=path,
+                subject=subject,
+                week=inferred_week,
+                category=inferred_category
+            ))
+        return sources
 
-    return found
+    if not categories:
+        categories = ["week", "pyq", "transcript", "additional"]
+
+    if "week" in categories:
+        for week_dir in base.glob("week_*"):
+            w = int(week_dir.name.split("_")[1])
+            if week is not None and w != week:
+                continue
+            for path in week_dir.rglob("*"):
+                if is_supported_file(path):
+                    sources.append(SourceFile(path=path, subject=subject, week=w, category="week"))
+
+    if "pyq" in categories and (week is None):
+        d = base / "pyq"
+        if d.exists():
+            for path in d.rglob("*"):
+                if is_supported_file(path):
+                    sources.append(SourceFile(path=path, subject=subject, week=None, category="pyq"))
+
+    if "transcript" in categories and (week is None):
+        d = base / "transcripts"
+        if d.exists():
+            for path in d.rglob("*"):
+                if is_supported_file(path):
+                    sources.append(SourceFile(path=path, subject=subject, week=None, category="transcript"))
+
+    if "additional" in categories and (week is None):
+        d = base / "additional"
+        if d.exists():
+            for path in d.rglob("*"):
+                if is_supported_file(path):
+                    sources.append(SourceFile(path=path, subject=subject, week=None, category="additional"))
+
+    return sorted(sources, key=lambda s: str(s.path))
+
+
+def remove_from_manifest(subject: str, file_path: str) -> None:
+    manifest = load_manifest(subject)
+    key = str(file_path)
+    if key in manifest:
+        del manifest[key]
+        save_manifest(subject, manifest)
 
 
 def manifest_path(subject: str, root: Path = DOCS_ROOT) -> Path:
@@ -179,7 +239,13 @@ def manifest_path(subject: str, root: Path = DOCS_ROOT) -> Path:
 def load_manifest(subject: str, root: Path = DOCS_ROOT) -> dict:
     path = manifest_path(subject, root)
     if path.exists():
-        return json.loads(path.read_text())
+        text = path.read_text().strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {}
     return {}
 
 

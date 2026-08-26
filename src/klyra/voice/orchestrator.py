@@ -1,0 +1,410 @@
+"""Gemini Live API voice orchestrator — transport-agnostic core.
+
+``VoiceOrchestrator`` manages the full lifecycle of a Gemini Live
+session: connecting, streaming audio in/out through an ``AudioTransport``,
+handling tool calls, and reconnecting on session timeout.
+
+Usage (from CLI)::
+
+    transport = PyAudioTransport()
+    orchestrator = VoiceOrchestrator(transport, voice_name="Puck")
+    asyncio.run(orchestrator.run())
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+# Defaults (overridable via env vars)
+_DEFAULT_MODEL = "gemini-2.0-flash-exp"
+_DEFAULT_VOICE = "Puck"
+_RECONNECT_DELAY_SECONDS = 2
+_MAX_RECONNECT_ATTEMPTS = 5
+
+_SYSTEM_INSTRUCTION = """\
+You are Klyra, a friendly and professional voice assistant for academic \
+content generation. You help educators create question papers, coding \
+problems, teaching materials, and more through natural conversation.
+
+Your capabilities (available as tools):
+• ingest — parse and index source documents for a subject
+• generate_question_paper — create a complete question paper with review and answer key
+• revise_question_paper — fix issues in a generated question paper
+• convert_documents — convert between Markdown and LaTeX
+• prepare_teaching_material — create session plans for live teaching
+• revise_teaching_material — revise teaching materials
+• fetch_transcript — download a YouTube video transcript
+• generate_coding_problems — create coding problems with validated test cases
+• revise_coding_problems — fix issues in generated coding problems
+
+CRITICAL GUARDRAILS (STAY IN CHARACTER):
+You are strictly an academic and teaching assistant. You MUST NOT engage in general chit-chat, discuss world news, give recipes, or answer questions completely unrelated to teaching, coding, question papers, or academic experience.
+If the user asks about out-of-domain topics (like cooking, daily news, or random facts), you MUST politely refuse and steer the conversation back to how you can help them with their teaching or academic workload. You MAY discuss ideas to improve teaching, coding, or academic experience if asked, but nothing outside of that scope.
+
+Conversation guidelines:
+1. When the user wants to perform an action, ask for required parameters \
+one or two at a time in natural conversation. Don't ask for all of them at once.
+2. For optional parameters, use sensible defaults unless the user mentions them.
+3. Before executing a tool, briefly confirm the key parameters with the user. Always use the exact folder name or identifier the user provides.
+4. After a tool completes, summarise the result conversationally.
+5. If a tool fails, explain the error in plain language and suggest fixes.
+6. Be concise — you are speaking, not writing. Keep responses short and natural.
+7. If the user's request is ambiguous, ask a clarifying question.
+8. English is your default language. If the user just says your name or a short/indistinct word, you MUST respond in English.
+9. You can understand and speak in any language requested by the user, but ONLY switch your spoken language if the user explicitly asks you to, or if they speak to you clearly in a foreign language in full sentences. Even then, you MUST NOT act as a language tutor or a general translator. You MUST keep the topic strictly focused on academic content generation and politely refuse general language-learning requests.
+10. If the user asks for a graph, diagram, or image, DO NOT claim that you cannot generate images. Your backend crews have LaTeX/TikZ tools that can generate diagrams automatically. You MUST respond affirmatively and use the appropriate 'revise' tool (e.g. revise_question_paper) to pass their request in the 'notes' parameter.
+"""
+
+
+class VoiceOrchestrator:
+    """Transport-agnostic Gemini Live session manager.
+
+    Parameters
+    ----------
+    transport : AudioTransport
+        The audio I/O backend (e.g. ``PyAudioTransport`` for CLI).
+    voice_name : str | None
+        Prebuilt voice name.  Falls back to ``KLYRA_VOICE_NAME`` env var,
+        then to ``"Puck"``.
+    """
+
+    def __init__(
+        self,
+        transport,  # AudioTransport — import-free for type hint
+        voice_name: str | None = None,
+    ) -> None:
+        self._transport = transport
+        self._voice_name = (
+            voice_name
+            or os.environ.get("KLYRA_VOICE_NAME", _DEFAULT_VOICE)
+        )
+        self._model = os.environ.get("KLYRA_VOICE_MODEL", _DEFAULT_MODEL)
+
+        # Resolved lazily in run() to avoid top-level heavy imports
+        self._client = None
+        self._session = None
+        self._executor = None
+        self._shutdown_event = asyncio.Event()
+        self._chat_history = []
+        self._current_model_response = ""
+
+    # ── Public entry point ──────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Main entry point. Connects to the Live API and handles reconnects."""
+        from google import genai
+        from google.genai import types
+        from klyra.voice.tool_declarations import get_all_declarations
+        from klyra.voice.tool_executor import ToolExecutor
+        import sys
+        import threading
+        import os
+
+        class _ThreadAwareStream:
+            def __init__(self, original_stream):
+                self.original_stream = original_stream
+
+            def write(self, s):
+                self.original_stream.write(s)
+
+            def flush(self):
+                self.original_stream.flush()
+
+            def __getattr__(self, name):
+                return getattr(self.original_stream, name)
+
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        
+        # Open a log file for background tool executions
+        try:
+            bg_log = open("voice_tools.log", "w", encoding="utf-8")
+        except Exception:
+            bg_log = None
+
+        try:
+            old_stderr_fd = os.dup(2)
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            sys.stderr.flush()
+            os.dup2(devnull_fd, 2)
+            new_stderr = os.fdopen(os.dup(old_stderr_fd), "w")
+        except Exception:
+            new_stderr = sys.stderr
+            old_stderr_fd = None
+            devnull_fd = None
+
+        sys.stdout = _ThreadAwareStream(sys.stdout)
+        sys.stderr = _ThreadAwareStream(new_stderr)
+
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise SystemExit(
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) must be set in your .env file."
+            )
+
+        self._client = genai.Client(api_key=api_key)
+        self._executor = ToolExecutor()
+
+        # Start audio transport
+        await self._transport.start()
+
+        print(f"\n  🎙  Klyra voice ready.  (model={self._model}, voice={self._voice_name})")
+        print("  Speak naturally. Press Ctrl+C to exit.\n")
+
+        attempt = 0
+        try:
+            while not self._shutdown_event.is_set():
+                # Build LiveConnectConfig dynamically to inject history
+                sys_inst = _SYSTEM_INSTRUCTION
+                if self._chat_history:
+                    history_text = "\n".join(f"{role.upper()}: {text}" for role, text in self._chat_history[-15:])
+                    sys_inst += f"\n\n### RECENT CONVERSATION HISTORY (for context after reconnection):\n{history_text}"
+
+                config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=self._voice_name,
+                            )
+                        )
+                    ),
+                    system_instruction=types.Content(
+                        parts=[types.Part(text=sys_inst)]
+                    ),
+                    tools=[
+                        types.Tool(
+                            function_declarations=[
+                                types.FunctionDeclaration(**decl)
+                                for decl in get_all_declarations()
+                            ]
+                        )
+                    ],
+                )
+
+                try:
+                    await self._session_loop(config)
+                except Exception as exc:
+                    if self._shutdown_event.is_set():
+                        break
+                    attempt += 1
+                    if attempt > _MAX_RECONNECT_ATTEMPTS:
+                        logger.error(
+                            "Max reconnect attempts (%d) reached, giving up.",
+                            _MAX_RECONNECT_ATTEMPTS,
+                        )
+                        raise
+                    logger.debug(
+                        "Session ended (%s). Reconnecting in %ds (attempt %d/%d)...",
+                        exc,
+                        _RECONNECT_DELAY_SECONDS,
+                        attempt,
+                        _MAX_RECONNECT_ATTEMPTS,
+                    )
+                    print(
+                        f"\n  ⟳  Session ended. Reconnecting "
+                        f"({attempt}/{_MAX_RECONNECT_ATTEMPTS})...\n"
+                    )
+                    
+                    # Restart transport to recover from PyAudio Stream closed errors
+                    try:
+                        await self._transport.stop()
+                    except Exception:
+                        pass
+                    
+                    await asyncio.sleep(_RECONNECT_DELAY_SECONDS)
+                    
+                    try:
+                        await self._transport.start()
+                    except Exception:
+                        pass
+                else:
+                    # Clean session end (shouldn't normally happen)
+                    break
+        except KeyboardInterrupt:
+            import logging
+            logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+            pass
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            if old_stderr_fd is not None:
+                try:
+                    os.dup2(old_stderr_fd, 2)
+                    os.close(old_stderr_fd)
+                    os.close(devnull_fd)
+                except Exception:
+                    pass
+            print("\n  👋  Klyra voice session ended.\n")
+            await self._transport.stop()
+
+    # ── Session loop ────────────────────────────────────────────────
+
+    async def _session_loop(self, config) -> None:
+        """Single Gemini Live session — runs until timeout or error."""
+        async with self._client.aio.live.connect(
+            model=self._model, config=config
+        ) as session:
+            self._session = session
+            logger.info("Gemini Live session connected")
+
+            # Three concurrent tasks
+            input_task = asyncio.create_task(
+                self._stream_input(session), name="voice-input"
+            )
+            output_task = asyncio.create_task(
+                self._stream_output(session), name="voice-output"
+            )
+
+            try:
+                # Wait until any task finishes (error or session end)
+                done, pending = await asyncio.wait(
+                    [input_task, output_task],
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+
+                # Cancel remaining tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                # Re-raise any exception from completed tasks
+                for task in done:
+                    exc = task.exception()
+                    if exc is not None:
+                        raise exc
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._session = None
+
+    # ── Audio streaming ─────────────────────────────────────────────
+
+    async def _stream_input(self, session) -> None:
+        """Continuously read mic audio and send to Gemini."""
+        while not self._shutdown_event.is_set():
+            try:
+                chunk = await self._transport.read_chunk()
+                if chunk:
+                    await session.send_realtime_input(
+                        audio={"data": chunk, "mime_type": "audio/pcm"}
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Input stream error: %s", exc)
+                raise
+
+    async def _stream_output(self, session) -> None:
+        """Receive responses from Gemini — audio playback + tool handling."""
+        agent_speaking = False
+        while not self._shutdown_event.is_set():
+            try:
+                async for response in session.receive():
+                    # 1. Handle tool calls
+                    if (
+                        response.tool_call is not None
+                        and response.tool_call.function_calls
+                    ):
+                        if agent_speaking:
+                            print("\033[0m\n", end="", flush=True)
+                            agent_speaking = False
+                        else:
+                            print("\n", end="", flush=True)
+                        await self._handle_tool_calls(
+                            session, response.tool_call.function_calls
+                        )
+
+                    # 2. Extract directly from server_content to avoid SDK warnings
+                    # which are triggered by accessing response.text or response.data
+                    if response.server_content is not None:
+                        # Handle user transcription
+                        if response.server_content.interim_input_transcription:
+                            if agent_speaking:
+                                print("\033[0m\n", end="", flush=True)
+                                agent_speaking = False
+                            print(f"\r  🎙  You: {response.server_content.interim_input_transcription.text}", end="\033[K", flush=True)
+                        
+                        if response.server_content.input_transcription:
+                            if agent_speaking:
+                                print("\033[0m\n", end="", flush=True)
+                                agent_speaking = False
+                            user_text = response.server_content.input_transcription.text
+                            print(f"\r  🎙  You: {user_text}\033[K")
+                            self._chat_history.append(("user", user_text))
+
+                        # Handle agent text (from output_transcription)
+                        if response.server_content.output_transcription:
+                            if not agent_speaking:
+                                print("\r  🤖  Klyra: \033[36m", end="", flush=True)
+                                agent_speaking = True
+                            print(f"{response.server_content.output_transcription.text}", end="", flush=True)
+                            self._current_model_response += response.server_content.output_transcription.text
+
+                        # Handle agent response (text and audio)
+                        if response.server_content.model_turn is not None:
+                            for part in response.server_content.model_turn.parts:
+                                if part.inline_data and part.inline_data.data:
+                                    await self._transport.write_chunk(part.inline_data.data)
+                                if part.text:
+                                    if not agent_speaking:
+                                        print("\r  🤖  Klyra: \033[36m", end="", flush=True)
+                                        agent_speaking = True
+                                    print(f"{part.text}", end="", flush=True)
+                                    self._current_model_response += part.text
+                        
+                        if response.server_content.turn_complete:
+                            if self._current_model_response:
+                                self._chat_history.append(("model", self._current_model_response))
+                                self._current_model_response = ""
+                            if agent_speaking:
+                                print("\033[0m\n", end="", flush=True)
+                                agent_speaking = False
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Output stream error: %s", exc)
+                raise
+
+    # ── Tool call handling ──────────────────────────────────────────
+
+    async def _handle_tool_calls(self, session, function_calls) -> None:
+        """Execute tool calls and send results back to Gemini."""
+        from google.genai import types
+
+        responses = []
+        for fc in function_calls:
+            logger.info("Tool call: %s(%s)", fc.name, fc.args)
+            print(f"  ⚙  Executing: {fc.name}...")
+
+            result = await self._executor.execute(fc.name, dict(fc.args))
+
+            if result.get("status") == "success":
+                print(f"  ✓  {fc.name} completed.")
+            else:
+                print(f"  ✗  {fc.name} failed: {result.get('message', 'unknown error')}")
+
+            responses.append(
+                types.FunctionResponse(
+                    name=fc.name,
+                    id=fc.id,
+                    response=result,
+                )
+            )
+
+        # Send all responses back to Gemini
+        await session.send_tool_response(
+            function_responses=responses
+        )

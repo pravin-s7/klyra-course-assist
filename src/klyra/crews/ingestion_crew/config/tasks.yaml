@@ -5,19 +5,22 @@ parse_documents_task:
     docs/{subject}/transcripts by calling the parse_subject_documents tool
     exactly once with subject="{subject}", week={week_filter} (pass this
     exact value - it is either a specific week number or None to mean "every
-    week"), and force={force} (pass this exact boolean - True means re-parse
+    week"), categories_filter={categories_filter} (pass this exact value - it limits parsing to a specific folders like pyq, transcript), file_path={file_path} (pass this exact value), and force={force} (pass this exact boolean - True means re-parse
     every matching file even if unchanged since last time, e.g. to pick up
     newly-added image extraction; False means skip unchanged files as usual).
     Do not invent content for files that failed to parse - report them
     instead.
   expected_output: >
     The tool's summary of files parsed, skipped (unchanged), degraded
-    (images not understood), and failed, for subject "{subject}".
+    (missing images), and failed, plus any extracted diagram counts.
   agent: document_parser
 
 index_syllabus_task:
   description: >
     For subject "{subject}", you must build the syllabus index.
+    If categories_filter="{categories_filter}" is a specific string (not empty) and does NOT contain the word "week", you MUST skip this entire task completely because PYQs and transcripts do not contain syllabus concepts.
+    However, you MUST echo the exact summary output you received from the parse_documents_task so the user knows their files were ingested, followed by " (Skipped syllabus indexing because category was {categories_filter})."
+    Otherwise:
     If week={week_filter} is a specific number (not None), you MUST ONLY index that specific week (skip steps 1-2 and just call fetch_parsed_chunks for that week).
     If week={week_filter} is None, then:
     Step 1: Call report_syllabus_gaps to get the exact list of missing weeks.
@@ -26,7 +29,7 @@ index_syllabus_task:
     Step 4: Extract the concepts from the chunks and call write_syllabus_entries.
     CRITICAL: Do NOT skip any existing week. For example, if weeks 1, 5, and 6 exist, you MUST make separate fetch_parsed_chunks calls for week 1, week 5, and week 6. Do not stop after week 1!
     Include the result of report_syllabus_gaps verbatim in your final answer if it was called.
+    You MUST include the exact summary output you received from the parse_documents_task at the beginning of your final answer, so the user knows exactly what files were ingested across all categories (including pyq, transcripts, additional, and weeks).
   expected_output: >
-    A per-week concept count summary for "{subject}" and the explicit list
-    of any missing/empty weeks (1-12) from report_syllabus_gaps.
+    The exact parser summary from parse_documents_task, followed by a per-week concept count summary for "{subject}" and the explicit list of any missing/empty weeks (1-12) from report_syllabus_gaps.
   agent: syllabus_indexer

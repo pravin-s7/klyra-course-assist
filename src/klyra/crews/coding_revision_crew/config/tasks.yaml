@@ -31,8 +31,7 @@ revise_coding_problems_task:
     CRITICAL MULTIPLE-PROBLEM RULES:
     1. If the problem you are revising is part of a multiple-problem package, you MUST pass the correct `problem_subdir` to write_coding_package (e.g., problem-1, problem-2) so the files aren't dumped in the root folder.
     2. If you fixed a test case that was embedded as an example in the README, you MUST pass the corrected README via the `readme` parameter to write_coding_package so it stays consistent. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers.
-    3. You MUST call write_subject_file to write your verified reference solution code to a file named `solution.{language}` (e.g. solution.py, solution.c) inside the problem's directory (e.g. `generated/coding/{name}/problem-1/solution.py` or `generated/coding/{name}/solution.py`). Do not put the reference solution in README.md.
-    Subject="{subject}", name="{name}".
+    3. You MUST pass your verified reference solution code to write_coding_package using the `reference_solution` parameter. Do not call write_subject_file to write the solution. Do not put the reference solution in README.md.
     Subject="{subject}", name="{name}".
 
     --- ORIGINAL PROBLEMS ---

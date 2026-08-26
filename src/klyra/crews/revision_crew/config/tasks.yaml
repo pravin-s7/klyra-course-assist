@@ -19,8 +19,8 @@ revise_qp_task:
     content and never guess the course from the subject slug. Do not treat
     "syllabus index missing" as a reason to refuse revision when PYQs exist.
 
-    If a replacement question concerns a diagram-based concept (graph, tree,
-    BST, B-tree, ER diagram, dependency diagram, etc.), call search_images
+    If a replacement question concerns a diagram-based concept (block diagram,
+    logic circuit, state machine, architecture diagram, flow chart, etc.), call search_images
     first and embed a genuinely relevant result; if none exists and the
     diagram is specific to this question's own data, work out the correct
     structure yourself and call generate_diagram (LaTeX/TikZ) to render it,

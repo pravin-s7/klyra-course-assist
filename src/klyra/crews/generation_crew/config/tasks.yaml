@@ -23,24 +23,19 @@ create_qp_task:
     as "pyq" when a question is sourced only from the PYQ bank. If both
     syllabus and PYQ are empty, then say ingest is missing instead of
     guessing. For applied/computational concepts (e.g. algorithm tracing,
-    mathematical derivations, data structure manipulations) - write an actual
-    problem with concrete data (a specific graph, specific numbers/values,
+    mathematical derivations, logic/state manipulations) - write an actual
+    problem with concrete data (a specific state, specific numbers/values,
     specific code logic), asking the student to derive/compute a specific
     result. Do not reduce these to simple definition-recall questions when the
     concept is inherently procedural - NAT questions especially should require
     an actual computed answer, not a recalled fact. If pyq_similar_count > 0, OR if you are generating from the PYQ bank
     because syllabus is empty, use fetch_pyq_chunks / search_pyq to find
-    real PYQs and write NEW questions that are similar in concept, structure,
-    and difficulty to them - never copy a PYQ verbatim or make only a
-    trivial wording change; tag which questions are PYQ-similar plus which
-    PYQ they were inspired by. Do not pass week= to search_pyq. For any question about a diagram-based concept (graph,
-    tree, BST, B-tree, ER diagram, architecture diagram, dependency diagram,
-    etc.), call search_images first - if there's a genuinely relevant match,
-    embed the returned markdown image directly under the question stem and
-    refer to it in the question text (e.g. "Given the B-tree shown
-    below..."). If no real match exists but the question needs a diagram
-    specific to this question's own data (e.g. "the B-tree after inserting
-    these exact values", "this exact schema and FDs as a table"), work out
+    real PYQs and write NEW questions that test the same underlying concept but use a SUBSTANTIALLY DIFFERENT problem scenario - never copy a PYQ verbatim and NEVER just change numbers, variable names, or make slight wording tweaks; tag which questions are PYQ-similar plus which
+    PYQ they were inspired by. Do not pass week= to search_pyq. By default, you MUST proactively try to include questions that require visual diagrams, tables, or graphs. For any question about a diagram-based concept (block diagram,
+    logic circuit, state machine, architecture diagram, flow chart,
+    etc.), call search_images first to find reference material. NEVER embed raw images from search_images directly, as they are often messy video screenshots (e.g., showing the professor's face). Instead, if you find a relevant match, extract its exact logical structure or data, and call generate_diagram with LaTeX/TikZ to render a clean, synthetic version of it. If no match exists but the question needs a diagram
+    specific to this question's own data (e.g. "the state machine after applying
+    these exact inputs", "this exact architecture layout"), work out
     the exact correct structure yourself first, then call generate_diagram
     with LaTeX/TikZ to render it precisely - only do this once you already
     know the structure is correct, since it will faithfully draw whatever

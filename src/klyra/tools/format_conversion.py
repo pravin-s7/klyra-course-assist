@@ -237,57 +237,71 @@ class FormatLatexAsExamTool(BaseTool):
             return "Could not find \\begin{document} in the file."
         body = doc_match.group(1)
         
+        # Clean up sections and metadata
         body = re.sub(r"\\section\{.*?\}", "", body)
-        body = re.sub(r"\\label\{.*?\}", "", body)
-        body = re.sub(r"\\maketitle", "", body)
-        body = re.sub(r"\\subsubsection\{Question \d+\}", r"\\question", body)
+        body = re.sub(r"\\textbf\{Instructions:\}.*?(?=\\begin\{center\})", "", body, flags=re.DOTALL)
+        body = re.sub(r"\\subsubsection\{.*?\}", "", body, flags=re.DOTALL)
+        body = re.sub(r"\\begin\{center\}\\rule.*?\\end\{center\}", "", body, flags=re.DOTALL)
         
-        # Split by \question to process each question block individually
-        parts = body.split(r"\question")
-        for i in range(1, len(parts)):
-            q_block = parts[i]
-            
-            q_type = re.search(r"\\textbf\{Type:\}\s*(.*?)(?:\\\\|\n)", q_block)
-            q_week = re.search(r"\\textbf\{Week:\}\s*(.*?)(?:\\\\|\n)", q_block)
-            q_marks = re.search(r"\\textbf\{Marks:\}\s*(.*?)(?:\\\\|\n)", q_block)
-            
-            type_str = q_type.group(1).strip() if q_type else ""
-            week_str = q_week.group(1).strip() if q_week else ""
-            marks_str = q_marks.group(1).strip() if q_marks else ""
-            
-            hfill = f" \\hfill [Pravin: Week {week_str}: {type_str}: {marks_str} point]"
-            
-            q_start = re.search(r"\\textbf\{Question:\}(?:\\\\)?\s*", q_block)
-            if q_start:
-                q_content = q_block[q_start.end():]
-                
-                # Clean up dividers first
-                q_content = re.sub(r"\\begin\{center\}\\rule.*?\\end\{center\}", "", q_content, flags=re.DOTALL)
-                
-                # Find the last itemize (which should be the choices block)
-                itemize_idx = q_content.rfind(r"\begin{itemize}")
-                if itemize_idx != -1:
-                    q_text = q_content[:itemize_idx].rstrip()
-                    q_rest = q_content[itemize_idx:]
-                    parts[i] = f" \n{q_text}{hfill}\n\n{q_rest}"
-                else:
-                    parts[i] = f" \n{q_content.rstrip()}{hfill}\n\n"
-            else:
-                # If no question text is found, just clean up dividers
-                q_content = re.sub(r"\\begin\{center\}\\rule.*?\\end\{center\}", "", q_block, flags=re.DOTALL)
-                parts[i] = f" \n{q_content}"
-                
-        body = r"\question".join(parts)
+        # Split by \paragraph{\texorpdfstring{\textbf{Q\d+ ...
+        parts = re.split(r"\\paragraph\{\\texorpdfstring\{\\textbf\{Q\d+\s*\{\[?\}(.*?)\{?\]\}(.*?)\}\}\{.*?\}\}", body, flags=re.DOTALL)
         
-        def itemize_replacer(match):
-            list_content = match.group(1)
-            if "⃝" in list_content or "\\bigcirc" in list_content:
-                list_content = list_content.replace("\\tightlist", "")
-                list_content = re.sub(r"\\item\s*(?:⃝|\\bigcirc)", r"\\choice ", list_content)
-                return f"\\begin{{checkboxes}}\n{list_content}\n\\end{{checkboxes}}"
-            return match.group(0)
-            
-        body = re.sub(r"\\begin\{itemize\}(.*?)\\end\{itemize\}", itemize_replacer, body, flags=re.DOTALL)
+        if len(parts) > 1:
+            out_parts = [parts[0].strip()]
+            for i in range(1, len(parts), 3):
+                meta = parts[i].strip()
+                q_block = parts[i+2]
+                if q_block.startswith("}"):
+                    q_block = q_block[1:]
+                
+                marks = ""
+                marks_match = re.search(r"(\d+)\s*Marks?", meta, re.IGNORECASE)
+                if marks_match: marks = f"[{marks_match.group(1)}]"
+                
+                answer_letters = []
+                ans_match = re.search(r"\\textbf\{Answer:\}\s*([A-Z,\s]+)(?:\\\\|\n)", q_block)
+                if ans_match:
+                    answer_letters = [x.strip() for x in ans_match.group(1).split(",")]
+                    
+                def itemize_replacer(match):
+                    list_content = match.group(1)
+                    inner_items = re.findall(r"\\begin\{enumerate\}.*?\\item(.*?)\\end\{enumerate\}", list_content, flags=re.DOTALL)
+                    
+                    if not inner_items: return match.group(0)
+                        
+                    choices = []
+                    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                    for idx, text in enumerate(inner_items):
+                        text = text.strip()
+                        if idx < len(letters):
+                            letter = letters[idx]
+                            if letter in answer_letters: choices.append(f"    \\CorrectChoice {text}")
+                            else: choices.append(f"    \\choice {text}")
+                    
+                    return "\\begin{checkboxes}\n" + "\n".join(choices) + "\n\\end{checkboxes}"
+
+                q_block = re.sub(r"\\begin\{itemize\}(.*?)\\end\{itemize\}", itemize_replacer, q_block, flags=re.DOTALL)
+                
+                type_str = ""
+                week_str = ""
+                marks_val = ""
+                t_match = re.search(r"(MCQ|MSQ|NAT)", meta, re.IGNORECASE)
+                w_match = re.search(r"Week:\s*([^,]+)", meta, re.IGNORECASE)
+                m_match = re.search(r"(\d+)\s*Marks?", meta, re.IGNORECASE)
+                if t_match: type_str = t_match.group(1).upper()
+                if w_match: week_str = w_match.group(1).strip()
+                if m_match: marks_val = f"{m_match.group(1)} point"
+                
+                tag_parts = ["Pravin"]
+                if week_str: tag_parts.append(f"Week {week_str}")
+                if type_str: tag_parts.append(type_str)
+                if marks_val: tag_parts.append(marks_val)
+                
+                tag_str = ": ".join(tag_parts)
+                
+                out_parts.append(f"\\question{marks} \n{q_block.strip()} \\hfill [{tag_str}]")
+
+            body = "\n\n".join(out_parts)
         
         # Determine readable names for the header
         qp_name = filename.replace("-qp.tex", "").replace(".tex", "").replace("-", " ").title()

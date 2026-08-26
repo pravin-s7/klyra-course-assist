@@ -21,6 +21,11 @@ def run_teaching_material(
     from klyra.utils import fs
     from klyra.utils.parsing import parse_week_scope
 
+    fs.check_subject_exists(subject)
+
+    if not fs.subject_dir(subject).exists():
+        raise ValueError(f"Subject '{subject}' does not exist in docs/. Please run ingest first.")
+
     (fs.generated_dir(subject) / "teaching").mkdir(parents=True, exist_ok=True)
     inputs = {
         "subject": subject,
@@ -38,6 +43,8 @@ def run_teaching_revision(subject: str, session_name: str, notes: str) -> Any:
     instructions there is nothing to revise."""
     from klyra.crews.teaching_revision_crew.teaching_revision_crew import TeachingRevisionCrew
     from klyra.utils import fs
+
+    fs.check_subject_exists(subject)
 
     slug = fs.slugify(session_name)
     path = fs.generated_dir(subject) / "teaching" / f"{slug}-teaching-material.md"
