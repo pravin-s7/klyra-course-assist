@@ -41,8 +41,10 @@ create_coding_problems_task:
     format, output format, constraints/bounds); an explanation ONLY if
     genuinely needed; a hint ONLY if useful without giving the solution
     away; 1-2 sample test cases in the statement; and a full draft test
-    set - exactly {public_test_count} public + {private_test_count}
-    private - including real edge cases.
+    set - EXACTLY {public_test_count} public + {private_test_count}
+    private - including real edge cases. DO NOT skip any test cases.
+    DO NOT use "etc..." or omit the actual data. You MUST write out
+    every single test case fully.
     CRITICAL RULE: Every sample test case (Example 1, Example 2, etc.) that you put in the problem statement MUST be included as the very first items in the draft public test set section. This ensures the validator will actually test and correct the examples if your hand-calculated expected outputs are wrong.
 
     A reference solution is NOT required in the student-facing file.
@@ -87,6 +89,7 @@ coding_discrepancy_review_task:
     {pyq_similar_count}, leetcode_similar = {leetcode_similar},
     public_test_count = {public_test_count}, private_test_count =
     {private_test_count}. Do NOT execute or solve any code.
+    CRITICAL: You MUST manually count the generated public and private test cases. If there are not exactly {public_test_count} public tests and {private_test_count} private tests, you MUST flag this as an error. Do not simply output "met" if the counts are wrong.
   expected_output: >
     A per-problem discrepancy verdict (wording/scope only) plus a
     mix-compliance summary (difficulty / count / PYQ-similarity /
@@ -113,12 +116,13 @@ validate_test_cases_task:
     problem's test cases would all pass a subtly wrong solution, add a test
     case that catches it, and validate that too. Never report a test case
     or solution as correct without run_code actually confirming it passed;
-    if Docker/run_code is unavailable, say so plainly rather than assuming
-    correctness.    Keep your validated solutions in THIS report (testcases.md).
+    correctness. Keep your validated solutions in THIS report (testcases.md).
+    CRITICAL SQL RULE: If the language is 'sql', 'postgresql', or 'python-db' and there is an existing database schema (e.g., a `schema.sql` or `init.sql` file returned from the sources), you MUST supply the exact schema setup code (CREATE TABLE, INSERT data, etc) as the `stdin` input for each test case when calling run_code, so the sandbox can populate the database before running your solution!
+    CRITICAL: You MUST strictly count the test cases provided by the creator. There must be EXACTLY {public_test_count} public test cases and {private_test_count} private test cases per problem. If the creator generated fewer, you MUST write the missing test cases yourself (ensure they are correct by running them) and include them in the final output.
     After the tests are final, call write_coding_package for subject="{subject}" name="{name}" with the validated public/private cases so docs/{subject}/generated/coding/{name}/public and private folders are up to date. (Do NOT pass a custom evaluation_script; Klyra provides a robust default runner).
     CRITICAL MULTIPLE-PROBLEM RULES:
     1. If there are multiple problems, you MUST pass the correct `problem_subdir` to write_coding_package (e.g., problem-1, problem-2) so the files aren't dumped in the root folder.
-    2. If you fixed a test case that was embedded as an example in the README, you MUST pass the corrected README via the `readme` parameter to write_coding_package so it stays consistent. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers.
+    2. CRITICAL README FIXING: If you changed the expected output or input of a test case that is featured in the problem statement (like Example 1, Example 2), YOU MUST explicitly rewrite the README.md to reflect this correct output so it does not hallucinate the wrong output! Pass the fully corrected markdown text via the `readme` parameter to write_coding_package. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers. Do not just pass the original broken `readme`.
     3. You MUST call write_subject_file to write your verified reference solution code to a file named `solution.{language}` (e.g. solution.py, solution.c, solution.sh if bash) inside the problem's directory (e.g. `generated/coding/{name}/problem-1/solution.py` or `generated/coding/{name}/solution.py`). Do not put the reference solution in README.md.
   expected_output: >
     For every problem: the FINAL validated public and private test cases

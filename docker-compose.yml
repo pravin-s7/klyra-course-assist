@@ -12,6 +12,9 @@ x-klyra-common: &klyra-common
     - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
   volumes:
     - ./docs:/app/docs
+    # Local JSON storage for chat sessions. In a true production SaaS, 
+    # you would set KLYRA_SESSION_STORE=postgres to use the db service instead.
+    - ./.db:/app/.db
 
 services:
   web:

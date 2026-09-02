@@ -13,6 +13,7 @@ import os
 import platform
 import struct
 import sys
+import warnings
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,11 @@ class PyAudioTransport(AudioTransport):
         self._mic_stream = None
         self._spk_stream = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        
+        self._mic_actual_rate = INPUT_SAMPLE_RATE
+        self._spk_actual_rate = OUTPUT_SAMPLE_RATE
+        self._mic_state = None
+        self._spk_state = None
 
     async def start(self) -> None:
         try:
@@ -149,39 +155,86 @@ class PyAudioTransport(AudioTransport):
         # --- Open streams ---
         import pyaudio as _pa_mod
 
-        self._mic_stream = self._pa.open(
-            format=_pa_mod.paInt16,
-            channels=CHANNELS,
-            rate=INPUT_SAMPLE_RATE,
-            input=True,
-            frames_per_buffer=INPUT_CHUNK_FRAMES,
-        )
+        # Try default rates first, then fallback to 48000
+        fallback_rate = 48000
+        
+        try:
+            self._mic_stream = self._pa.open(
+                format=_pa_mod.paInt16,
+                channels=CHANNELS,
+                rate=INPUT_SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=INPUT_CHUNK_FRAMES,
+            )
+            self._mic_actual_rate = INPUT_SAMPLE_RATE
+        except Exception as e:
+            logger.warning("Failed to open mic at %dHz, trying %dHz. Error: %s", INPUT_SAMPLE_RATE, fallback_rate, e)
+            self._mic_actual_rate = fallback_rate
+            frames = int(INPUT_CHUNK_FRAMES * fallback_rate / INPUT_SAMPLE_RATE)
+            self._mic_stream = self._pa.open(
+                format=_pa_mod.paInt16,
+                channels=CHANNELS,
+                rate=fallback_rate,
+                input=True,
+                frames_per_buffer=frames,
+            )
 
-        self._spk_stream = self._pa.open(
-            format=_pa_mod.paInt16,
-            channels=CHANNELS,
-            rate=OUTPUT_SAMPLE_RATE,
-            output=True,
-            frames_per_buffer=OUTPUT_CHUNK_FRAMES,
-        )
+        try:
+            self._spk_stream = self._pa.open(
+                format=_pa_mod.paInt16,
+                channels=CHANNELS,
+                rate=OUTPUT_SAMPLE_RATE,
+                output=True,
+                frames_per_buffer=OUTPUT_CHUNK_FRAMES,
+            )
+            self._spk_actual_rate = OUTPUT_SAMPLE_RATE
+        except Exception as e:
+            logger.warning("Failed to open spk at %dHz, trying %dHz. Error: %s", OUTPUT_SAMPLE_RATE, fallback_rate, e)
+            self._spk_actual_rate = fallback_rate
+            frames = int(OUTPUT_CHUNK_FRAMES * fallback_rate / OUTPUT_SAMPLE_RATE)
+            self._spk_stream = self._pa.open(
+                format=_pa_mod.paInt16,
+                channels=CHANNELS,
+                rate=fallback_rate,
+                output=True,
+                frames_per_buffer=frames,
+            )
 
         logger.info(
-            "Audio transport started  mic=%dHz  spk=%dHz",
-            INPUT_SAMPLE_RATE,
-            OUTPUT_SAMPLE_RATE,
+            "Audio transport started  mic=%dHz (actual %dHz)  spk=%dHz (actual %dHz)",
+            INPUT_SAMPLE_RATE, self._mic_actual_rate,
+            OUTPUT_SAMPLE_RATE, self._spk_actual_rate,
         )
 
     async def read_chunk(self) -> bytes:
         """Read one chunk from the microphone (runs in executor)."""
-        return await self._loop.run_in_executor(
+        frames_to_read = INPUT_CHUNK_FRAMES
+        if self._mic_actual_rate != INPUT_SAMPLE_RATE:
+            frames_to_read = int(INPUT_CHUNK_FRAMES * self._mic_actual_rate / INPUT_SAMPLE_RATE)
+            
+        data = await self._loop.run_in_executor(
             None,
             self._mic_stream.read,
-            INPUT_CHUNK_FRAMES,
+            frames_to_read,
             False,  # exception_on_overflow
         )
+        
+        if self._mic_actual_rate != INPUT_SAMPLE_RATE:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                import audioop
+            data, self._mic_state = audioop.ratecv(data, 2, 1, self._mic_actual_rate, INPUT_SAMPLE_RATE, self._mic_state)
+            
+        return data
 
     async def write_chunk(self, data: bytes) -> None:
         """Write one chunk to the speaker (runs in executor)."""
+        if self._spk_actual_rate != OUTPUT_SAMPLE_RATE:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                import audioop
+            data, self._spk_state = audioop.ratecv(data, 2, 1, OUTPUT_SAMPLE_RATE, self._spk_actual_rate, self._spk_state)
+            
         await self._loop.run_in_executor(None, self._spk_stream.write, data)
 
     async def stop(self) -> None:

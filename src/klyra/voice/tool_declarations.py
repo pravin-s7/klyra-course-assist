@@ -25,21 +25,21 @@ def get_all_declarations() -> list[dict]:
         _delete_index(),
         _read_document(),
         _list_documents(),
+        _generate_diagram(),
     ]
-    
-    # Require confirmation for all tools except read-only ones
-    read_only = {"read_document", "list_documents", "fetch_transcript"}
+    # Require confirmation for ALL tools
     for d in decls:
-        if d["name"] not in read_only:
-            d["parameters"]["properties"]["confirmation_token"] = {
-                "type": "STRING",
-                "description": (
-                    "If you DO NOT have explicit permission to run this action, leave this empty. "
-                    "The tool will return an error, and you must ask the user for permission. "
-                    "However, if the user HAS ALREADY explicitly asked you to run this action, "
-                    "or has already given permission, set this to 'confirmed' immediately to execute it."
-                ),
-            }
+        if "required" not in d["parameters"]:
+            d["parameters"]["required"] = []
+        d["parameters"]["required"].append("user_has_confirmed")
+        d["parameters"]["properties"]["user_has_confirmed"] = {
+            "type": "BOOLEAN",
+            "description": (
+                "Set to true ONLY if you have explicitly asked the user for permission to run this tool in previous messages and they said yes. "
+                "You MUST also ask them if they want to provide optional arguments (concepts/notes). "
+                "If you haven't asked them yet, set it to false, and the tool will safely return an error so you can ask the user."
+            ),
+        }
             
     return decls
 
@@ -78,8 +78,9 @@ def _ingest() -> dict:
         "description": (
             "Parse and index a subject's source documents (PDFs, slides, "
             "transcripts, etc.) into the vector store so they can be used "
-            "for question paper and coding problem generation. Must be run "
-            "at least once per subject before generating anything."
+            "for question paper and coding problem generation. "
+            "CRITICAL: Do NOT run this automatically. ONLY run this tool if "
+            "the user explicitly asks to 'ingest', 'index', or 'upload' materials."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -103,6 +104,14 @@ def _ingest() -> dict:
                     "description": (
                         "If true, re-parse files even if they haven't changed "
                         "since the last ingestion. Default is false."
+                    ),
+                },
+                "categories": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": (
+                        "Optional: specific folders/categories to ingest (e.g. ['pyq', 'additional', 'transcripts']). "
+                        "If omitted, all materials are ingested."
                     ),
                 },
             },
@@ -200,7 +209,7 @@ def _generate_question_paper() -> dict:
                     ),
                 },
             },
-            "required": ["subject", "qp_name", "scope", "difficulty"],
+            "required": ["subject", "qp_name", "scope", "difficulty", "types", "num_questions"],
         },
     }
 
@@ -222,7 +231,7 @@ def _revise_question_paper() -> dict:
                 },
                 "qp_name": {
                     "type": "STRING",
-                    "description": "Name of the question paper to revise.",
+                    "description": "The base name of the question paper to revise (e.g. 'endterm-qp').",
                 },
                 "notes": {
                     "type": "STRING",
@@ -254,8 +263,10 @@ def _convert_documents() -> dict:
                 "request": {
                     "type": "STRING",
                     "description": (
-                        "What to convert, e.g. 'convert midterm-qp.md and "
-                        "midterm-answer-key.md to LaTeX'."
+                        "What to convert, e.g. 'convert midterm-qp-qp.md and "
+                        "midterm-qp-answer-key.md to LaTeX'. "
+                        "CRITICAL: Do NOT guess filenames. If you don't know the exact filenames, "
+                        "run list_documents first to find them."
                     ),
                 },
             },
@@ -525,14 +536,21 @@ def _delete_index() -> dict:
                     "type": "STRING",
                     "description": "Subject identifier.",
                 },
+                "source_files": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": "Optional list of exact paths of the source files to remove from the index."
+                },
+                "folder": {
+                    "type": "STRING",
+                    "description": "Optional specific folder (e.g. 'pyq') to remove from the index."
+                },
                 "source_file": {
                     "type": "STRING",
-                    "description": (
-                        "Exact path of the source file to remove from the index."
-                    ),
+                    "description": "Optional single exact path of the source file to remove from the index."
                 },
             },
-            "required": ["subject", "source_file"],
+            "required": ["subject"],
         },
     }
 
@@ -558,5 +576,45 @@ def _read_document() -> dict:
                 },
             },
             "required": ["subject", "filename"],
+        },
+    }
+
+
+
+def _generate_diagram() -> dict:
+    return {
+        "name": "generate_diagram",
+        "description": (
+            "Render a NEW diagram (tree, B-tree, graph, ER diagram, table, "
+            "dependency diagram, etc.) via LaTeX/TikZ. "
+            "Use this ONLY for academic purposes based on instructions. "
+            "You MUST output the returned image markdown directly to the user."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "subject": {
+                    "type": "STRING",
+                    "description": "Subject identifier (e.g. 'data-structures')."
+                },
+                "latex_body": {
+                    "type": "STRING",
+                    "description": (
+                        "LaTeX for the diagram - only the content that goes inside "
+                        "\\begin{document}...\\end{document}. "
+                        "CRITICAL: Adapt your TikZ/LaTeX structures to the precise semantics of the "
+                        "subject! For example, if CT, MUST be a DIRECTED graph."
+                    )
+                },
+                "caption": {
+                    "type": "STRING",
+                    "description": "Short caption describing the diagram."
+                },
+                "ground_truth": {
+                    "type": "STRING",
+                    "description": "The FULL factual content of the diagram in plain text."
+                }
+            },
+            "required": ["subject", "latex_body", "caption", "ground_truth"],
         },
     }

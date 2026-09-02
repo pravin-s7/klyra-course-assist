@@ -15,7 +15,8 @@ prepare_teaching_material_task:
     major concept; (4) a real diagram where one genuinely helps
     (search_images first; only call generate_diagram for a diagram specific
     to an example you're constructing and whose exact structure you already
-    know - never fabricate one); (5) a short set of discussion/check-in
+    know, applying proper domain semantics like DIRECTED graphs, 
+    logic gates for circuits, ER symbols for DBMS, etc - never fabricate one); (5) a short set of discussion/check-in
     questions for the end of the session. Follow the instructor's notes on
     emphasis, depth, and format even where they add to or reshape this
     default structure - the notes take priority over the default structure.

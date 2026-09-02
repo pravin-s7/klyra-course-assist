@@ -210,6 +210,72 @@ def _cmd_voice(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_chat(args: argparse.Namespace) -> int:
+    import asyncio
+
+    async def _run_chat():
+        from klyra.chat import ChatOrchestrator
+
+        orchestrator = ChatOrchestrator(
+            on_text=lambda text: print(text, end="", flush=True),
+            on_tool_start=lambda name, _args: print(f"\n  ⚙  Executing: {name}..."),
+            on_tool_done=lambda name, status, msg: print(
+                f"  {'✓' if status == 'success' else '✗'}  {name} {'completed' if status == 'success' else 'failed'}."
+            ),
+        )
+        await orchestrator.initialize()
+
+        print("\n  💬  Klyra chat ready. Type your message and press Enter.")
+        print("  Type 'exit' or press Ctrl+C to quit.\n")
+
+        while True:
+            try:
+                user_input = input("  You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not user_input or user_input.lower() in ("exit", "quit", "bye"):
+                break
+
+            print("\n  🤖  Klyra: \033[36m", end="", flush=True)
+            await orchestrator.send_message(user_input)
+            print("\033[0m\n")
+
+    try:
+        asyncio.run(_run_chat())
+    except KeyboardInterrupt:
+        pass
+    print("\n  👋  Klyra chat session ended.\n")
+    return 0
+
+
+def _cmd_web(args: argparse.Namespace) -> int:
+    import uvicorn
+    import webbrowser
+    import threading
+
+    host = args.host
+    port = args.port
+
+    def open_browser():
+        import time
+        time.sleep(1.5)
+        webbrowser.open(f"http://{host}:{port}")
+
+    threading.Thread(target=open_browser, daemon=True).start()
+
+    print(f"\n  🌐  Starting Klyra web UI at http://{host}:{port}")
+    print("  Press Ctrl+C to stop.\n")
+
+    uvicorn.run(
+        "klyra.web.server:app",
+        host=host,
+        port=port,
+        log_level="warning",
+        loop="asyncio",
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="klyra")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -261,7 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--types", default=None, help="Comma-separated types if not using --type-counts, e.g. MCQ,MSQ,NAT"
     )
     p_generate.add_argument(
-        "--num-questions", type=int, default=None, dest="num_questions", help="Total, if not using --type-counts"
+        "--num-questions", type=int, required=True, dest="num_questions", help="Total, if not using --type-counts"
     )
     p_generate.add_argument(
         "--notes",
@@ -406,6 +472,20 @@ def build_parser() -> argparse.ArgumentParser:
              'Default: KLYRA_VOICE_NAME env var or "Puck"',
     )
     p_voice.set_defaults(func=_cmd_voice)
+
+    p_chat = sub.add_parser(
+        "chat",
+        help="Start a text-based chat session with Klyra in the terminal",
+    )
+    p_chat.set_defaults(func=_cmd_chat)
+
+    p_web = sub.add_parser(
+        "web",
+        help="Launch the Klyra web UI with chat + voice support",
+    )
+    p_web.add_argument("--host", default="127.0.0.1")
+    p_web.add_argument("--port", type=int, default=8765)
+    p_web.set_defaults(func=_cmd_web)
 
     return parser
 

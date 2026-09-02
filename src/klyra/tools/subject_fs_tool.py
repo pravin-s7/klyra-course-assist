@@ -172,7 +172,7 @@ exit $fail
 
 _C_EVAL = r"""#!/usr/bin/env bash
 set -uo pipefail
-SOLUTION=${1:?usage: evaluation_script.sh solution.c}
+SOLUTION=${{1:?usage: evaluation_script.sh solution.c}}
 ROOT=$(cd "$(dirname "$0")" && pwd)
 BIN=$(mktemp)
 trap 'rm -f "$BIN"' EXIT

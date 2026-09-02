@@ -10,9 +10,45 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
-from typing import Any
+import sys
+import contextlib
+import io
+from typing import Any, Callable, Coroutine
 
 logger = logging.getLogger(__name__)
+
+class LogStreamer(io.StringIO):
+    """Intercepts stdout, prints to terminal, and sends via async callback."""
+    def __init__(self, loop: asyncio.AbstractEventLoop, executor: 'ToolExecutor', tool_name: str):
+        super().__init__()
+        self.loop = loop
+        self.executor = executor
+        self.tool_name = tool_name
+        self._buffer = ""
+
+    def write(self, string: str):
+        sys.__stdout__.write(string)
+        sys.__stdout__.flush()
+        self._buffer += string
+        if '\n' in self._buffer:
+            lines = self._buffer.split('\n')
+            self._buffer = lines.pop()
+            for line in lines:
+                text = line + '\n'
+                if self.executor.on_log_callback and self.loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self.executor.on_log_callback(self.tool_name, text),
+                        self.loop
+                    )
+                    
+    def flush(self):
+        sys.__stdout__.flush()
+        if self._buffer and self.executor.on_log_callback and self.loop:
+            asyncio.run_coroutine_threadsafe(
+                self.executor.on_log_callback(self.tool_name, self._buffer),
+                self.loop
+            )
+            self._buffer = ""
 
 
 class ToolExecutor:
@@ -32,10 +68,12 @@ class ToolExecutor:
         "delete_index": "_run_delete_index",
         "read_document": "_run_read_document",
         "list_documents": "_run_list_documents",
+        "generate_diagram": "_run_generate_diagram",
     }
 
-    def __init__(self):
+    def __init__(self, on_log_callback: Callable[[str, str], Coroutine[Any, Any, None]] | None = None):
         self._confirmation_tokens: dict[str, str] = {}
+        self.on_log_callback = on_log_callback
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Dispatch *name* with *args* to the appropriate service function.
@@ -54,29 +92,40 @@ class ToolExecutor:
         if "subject" in args and isinstance(args["subject"], str):
             args["subject"] = args["subject"].lower()
 
-        # Require explicit confirmation for write actions
-        read_only_tools = {"read_document", "list_documents", "fetch_transcript"}
-        if name not in read_only_tools:
-            provided_token = args.get("confirmation_token")
-            
-            if provided_token != "confirmed":
-                return {
-                    "status": "confirmation_required", 
-                    "message": (
-                        f"The tool '{name}' performs a significant action or takes a long time. "
-                        "You MUST ask the user for explicit confirmation before proceeding. "
-                        "CRITICAL: Do NOT call this tool again in this same turn! "
-                        "You MUST generate a response asking the user for permission, "
-                        "and wait for them to reply. Only if they reply 'yes' in the NEXT turn, "
-                        "call this tool again with confirmation_token='confirmed'."
-                    )
-                }
-
         handler = getattr(self, handler_name)
         logger.info("Executing tool %s with args %s", name, args)
 
         try:
-            result = await asyncio.to_thread(handler, args)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+            
+        def _run_with_redirect(h, a, l):
+            if self.on_log_callback and l:
+                streamer = LogStreamer(l, self, name)
+                
+                # Capture standard python logging in this thread
+                log_handler = logging.StreamHandler(streamer)
+                log_handler.setLevel(logging.INFO)
+                log_handler.setFormatter(logging.Formatter('%(message)s'))
+                root_logger = logging.getLogger()
+                root_logger.addHandler(log_handler)
+                
+                try:
+                    with contextlib.redirect_stdout(streamer), contextlib.redirect_stderr(streamer):
+                        logger.info(f"--- Starting tool: {name} ---")
+                        if "subject" in a:
+                            logger.info(f"Subject: {a['subject']}")
+                        logger.info("Initializing task...\n")
+                        res = h(a)
+                        streamer.flush()
+                        return res
+                finally:
+                    root_logger.removeHandler(log_handler)
+            return h(a)
+
+        try:
+            result = await asyncio.to_thread(_run_with_redirect, handler, args, loop)
             logger.info("Tool %s completed successfully", name)
             return {"status": "success", **result}
         except Exception as exc:
@@ -96,6 +145,7 @@ class ToolExecutor:
         result = run_ingestion(
             subject=args["subject"],
             week=args.get("week"),
+            categories=args.get("categories"),
             force=args.get("force", False),
         )
         return {
@@ -192,7 +242,12 @@ class ToolExecutor:
 
     @staticmethod
     def _run_code(args: dict) -> dict:
+        import logging
         from klyra.services.coding_problem_service import run_coding_generation
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f"Starting generation of coding problems for '{args.get('subject', 'unknown')}'...")
+        logger.info("Booting up CrewAI agents. This may take a moment...")
 
         result = run_coding_generation(
             subject=args["subject"],
@@ -230,50 +285,89 @@ class ToolExecutor:
 
     @staticmethod
     def _run_delete_index(args: dict) -> dict:
-        from klyra.tools import vector_store
+        from klyra.services.ingestion_service import run_ingestion
+        from klyra.utils.fs import discover_subject_files
+        from pathlib import Path
 
         subject = args["subject"]
-        source_file = args["source_file"]
-        where = {"source_file": source_file}
+        files_to_delete = []
 
-        for name_func in [
-            vector_store.parsed_collection_name,
-            vector_store.syllabus_collection_name,
-            vector_store.pyq_collection_name,
-            vector_store.images_collection_name,
-        ]:
-            name = name_func(subject)
-            vector_store.delete_by_metadata(name, where)
+        if "source_files" in args:
+            files_to_delete.extend(args["source_files"])
+
+        # Also support the old source_file parameter just in case
+        if "source_file" in args:
+            files_to_delete.append(args["source_file"])
+
+        if "folder" in args:
+            folder = args["folder"]
+            try:
+                sources = discover_subject_files(subject)
+                source_dir = Path("docs") / subject
+                for s in sources:
+                    try:
+                        rel = s.path.relative_to(source_dir)
+                        if str(rel).startswith(folder):
+                            files_to_delete.append(str(s.path.resolve()))
+                    except ValueError:
+                        pass
+            except FileNotFoundError:
+                pass
+
+        if not files_to_delete:
+            return {"message": "No files specified or found to delete."}
+
+        files_to_delete = list(set(files_to_delete))
+
+        for f in files_to_delete:
+            run_ingestion(subject, delete_file=f)
 
         return {
-            "message": (
-                f"Deleted index entries from '{subject}' collections "
-                f"where source_file='{source_file}'."
-            ),
+            "message": f"Successfully deleted {len(files_to_delete)} files from the index.",
         }
 
     @staticmethod
     def _run_list_documents(args: dict) -> dict:
+        import logging
         from pathlib import Path
         from klyra.utils import fs
+        
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        logger.info("Executing list_documents tool...")
+        
+        # Normalize subject to lowercase because Klyra's voice transcriptions often capitalize it,
+        # and the underlying Linux folders expect lowercase names.
+        if "subject" in args and isinstance(args["subject"], str):
+            args["subject"] = args["subject"].lower()
         
         subject = args["subject"]
         folder = args.get("folder", "")
         
         try:
+            logger.info(f"Target subject: '{subject}'")
+            logger.info(f"Target folder: '{folder}'")
+            
             subject_dir = fs.subject_dir(subject).resolve()
             target_dir = (subject_dir / folder).resolve()
             
+            logger.info(f"Resolved path: {target_dir}")
+            
             if not str(target_dir).startswith(str(subject_dir)):
+                logger.error(f"Security error: Path {folder} is outside the subject's docs directory.")
                 return {"message": f"Error: Path {folder} is outside the subject's docs directory."}
                 
             if not target_dir.exists() or not target_dir.is_dir():
+                logger.error(f"Directory not found: {target_dir}")
                 return {"message": f"Error: Folder '{folder}' not found in docs/{subject}/"}
                 
             files = sorted([str(p.relative_to(subject_dir)) for p in target_dir.rglob("*") if p.is_file()])
             
             if not files:
+                logger.info("No files found.")
                 return {"message": f"No files found in docs/{subject}/{folder}"}
+                
+            logger.info(f"Found {len(files)} files.")
                 
             return {"message": f"Files available in docs/{subject}/{folder}:\n- " + "\n- ".join(files)}
         except Exception as exc:
@@ -281,21 +375,32 @@ class ToolExecutor:
 
     @staticmethod
     def _run_read_document(args: dict) -> dict:
+        import logging
         from pathlib import Path
         from klyra.utils import fs
         import io
         import re
         import difflib
+        
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
 
         subject = args["subject"]
         filename = args["filename"]
+        
+        logger.info(f"Executing read_document tool...")
+        logger.info(f"Target subject: '{subject}'")
+        logger.info(f"Target file: '{filename}'")
         
         # Resolve path safely inside the subject's docs directory
         subject_dir = fs.subject_dir(subject).resolve()
         target_path = (subject_dir / filename).resolve()
         
+        logger.info(f"Resolved path: {target_path}")
+        
         # If the exact path doesn't exist, try to find it recursively anywhere in the subject's folder
         if not target_path.exists():
+            logger.info("File not found at exact path. Attempting recursive search...")
             basename = Path(filename).name
             all_files = [p for p in subject_dir.rglob("*") if p.is_file()]
             
@@ -335,6 +440,7 @@ class ToolExecutor:
         if not target_path.is_file():
             return {"message": f"Error: '{target_path.name}' is not a file."}
             
+        logger.info("Reading document content...")
         try:
             if target_path.suffix.lower() == ".pdf":
                 from pypdf import PdfReader
@@ -350,3 +456,27 @@ class ToolExecutor:
             return {"message": f"File '{filename}' contents:\n\n{content}"}
         except Exception as exc:
             return {"message": f"Error reading file '{filename}': {exc}"}
+
+    @staticmethod
+    def _run_generate_diagram(args: dict) -> dict:
+        from klyra.tools.latex_diagram_tool import GenerateDiagramTool
+        import re
+        
+        tool = GenerateDiagramTool()
+        try:
+            result = tool._run(
+                subject=args["subject"],
+                latex_body=args["latex_body"],
+                caption=args["caption"],
+                ground_truth=args["ground_truth"]
+            )
+            match = re.search(r'\[.*?\]\((.*?)\)', result)
+            if match:
+                rel_path = match.group(1)
+                file_name = rel_path.split("/")[-1]
+                web_path = f"/files/{args['subject']}/assets/generated/{file_name}"
+                result = result.replace(rel_path, web_path)
+                
+            return {"status": "success", "markdown": result}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}

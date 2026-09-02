@@ -91,7 +91,13 @@ class GenerateDiagramInput(BaseModel):
             "\\begin{document}...\\end{document} (e.g. a full "
             "\\begin{tikzpicture}...\\end{tikzpicture} block, or a "
             "\\begin{tabular}...\\end{tabular}). Do not include "
-            "\\documentclass or \\begin{document}."
+            "\\documentclass or \\begin{document}. "
+            "CRITICAL: Adapt your TikZ/LaTeX structures to the precise semantics of the "
+            "subject! For example, if the subject is Computational Thinking (CT) and you are "
+            "drawing a graph, it MUST be a DIRECTED graph (use -> edges) unless specified otherwise. "
+            "If it is DBMS, use precise standard ER diagram symbols (diamonds for relations, etc). "
+            "If it is Digital Electronics, use standard logic gate shapes. "
+            "Always honor the domain conventions."
         ),
     )
     caption: str = Field(..., description="Short caption describing the diagram (used in the filename and alt text)")
@@ -119,7 +125,11 @@ class GenerateDiagramTool(BaseTool):
         "real diagram over generating one when a real one fits). Write the "
         "LaTeX yourself: tikz libraries trees, graphs, graphs.standard, "
         "arrows.meta, positioning, er, matrix, shapes are pre-loaded, plus "
-        "pgfplots and booktabs. You MUST also supply ground_truth (the "
+        "pgfplots and booktabs. "
+        "CRITICAL DOMAIN ACCURACY: You must ensure standard conventions are met "
+        "(e.g. Computational Thinking / CT graphs must be directed by default, "
+        "DBMS diagrams must use proper ER notation, circuits must use standard gates). "
+        "You MUST also supply ground_truth (the "
         "diagram's full factual content in text) so other agents that can't "
         "see the image can still verify/solve the question - this is indexed "
         "into search_images, not shown to students. Returns ready-to-paste "
@@ -163,3 +173,42 @@ class GenerateDiagramTool(BaseTool):
         )
 
         return f"![{caption}]({fs.markdown_image_path(subject, image_path)})"
+
+class GenerateGraphInput(BaseModel):
+    subject: str
+    latex_body: str = Field(
+        ...,
+        description=(
+            "LaTeX for the graph - only the content that goes inside "
+            "\\begin{document}...\\end{document} (e.g. a full "
+            "\\begin{tikzpicture}...\\end{tikzpicture} block). "
+            "CRITICAL: Adapt your TikZ/LaTeX structures to the precise semantics of the "
+            "subject! For example, if the subject is Computational Thinking (CT), it MUST be a "
+            "DIRECTED graph (use -> edges) unless specified otherwise. Always honor domain conventions."
+        ),
+    )
+    caption: str = Field(..., description="Short caption describing the graph")
+    ground_truth: str = Field(
+        ...,
+        description=(
+            "The FULL factual content of the graph in plain text - e.g. every "
+            "node and edge ('nodes A,B,C,D; edges A->B, A->C, B->D'). "
+            "This is indexed so other agents can verify the content. Never leave this out."
+        ),
+    )
+    week: int | None = Field(default=None, description="Week 1-12 this graph is for, if known")
+
+
+class GenerateGraphTool(GenerateDiagramTool):
+    name: str = "generate_graph"
+    description: str = (
+        "Render a NEW graph (directed, undirected, weighted, trees, etc.) via LaTeX/TikZ. "
+        "Use this tool specifically when you need to generate a graph. "
+        "Write the LaTeX yourself: tikz libraries trees, graphs, graphs.standard, "
+        "arrows.meta, positioning are pre-loaded. "
+        "CRITICAL DOMAIN ACCURACY: You must ensure standard conventions are met "
+        "(e.g. Computational Thinking graphs must be directed by default). "
+        "You MUST also supply ground_truth (the graph's full factual content in text). "
+        "Returns ready-to-paste markdown image syntax on success, or a compile error."
+    )
+    args_schema: Type[BaseModel] = GenerateGraphInput

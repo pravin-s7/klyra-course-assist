@@ -14,7 +14,7 @@ from crewai import Agent, Crew, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 
-from klyra.llm_config import default_llm, default_embedder
+from klyra.llm_config import default_llm, default_embedder, coding_llm
 from klyra.tools.code_execution_tool import RunCodeTool
 from klyra.tools.coding_source_tool import SearchCodingSourcesTool
 from klyra.tools.leetcode_tool import SearchLeetCodeTool
@@ -44,7 +44,7 @@ class CodingProblemCrew:
                 WriteCodingPackageTool(),
                 WriteSubjectFileTool(),
             ],
-            llm=default_llm(),
+            llm=coding_llm(),
             verbose=True,
         )
 
@@ -53,7 +53,7 @@ class CodingProblemCrew:
         return Agent(
             config=self.agents_config["coding_discrepancy_reviewer"],  # type: ignore[index]
             tools=[SearchCodingSourcesTool(), SearchLeetCodeTool(), PyqSearchTool()],
-            llm=default_llm(),
+            llm=coding_llm(),
             verbose=True,
         )
 
@@ -62,7 +62,7 @@ class CodingProblemCrew:
         return Agent(
             config=self.agents_config["test_case_validator"],  # type: ignore[index]
             tools=[RunCodeTool(), WriteCodingPackageTool(), WriteSubjectFileTool()],
-            llm=default_llm(),
+            llm=coding_llm(),
             verbose=True,
         )
 

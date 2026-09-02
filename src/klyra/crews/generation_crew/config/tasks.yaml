@@ -15,10 +15,14 @@ create_qp_task:
     Call list_source_files first. If syllabus/parsed files exist, use
     search_syllabus to ground every question in real indexed concepts for
     the requested subject/week/source scope only - never invent syllabus
-    content. If the syllabus index is empty but PYQ files exist, that is
-    enough: call fetch_pyq_chunks (and search_pyq with query='any' or
-    wording taken from those chunks / {concepts} / {notes}) and write the
-    paper from the PYQ bank. Do not refuse. Do not guess the course from
+    content. If the syllabus index is empty but PYQ files exist, you may use the
+    PYQ bank as a fallback ONLY IF the user requested 'all' weeks or did not 
+    restrict the scope to specific weeks. If the user explicitly requested specific 
+    weeks (e.g. {syllabus_scope}) and the syllabus index is empty for those weeks, 
+    DO NOT fallback to random PYQs because PYQs are not labeled by week and you 
+    will generate off-topic questions. Instead, immediately state that the syllabus 
+    for the requested weeks has not been ingested and refuse to generate the paper. 
+    Do not invent questions. Do not guess the course from
     the subject slug (e.g. do not treat "ct" as compiler theory). Tag week
     as "pyq" when a question is sourced only from the PYQ bank. If both
     syllabus and PYQ are empty, then say ingest is missing instead of
@@ -36,7 +40,9 @@ create_qp_task:
     etc.), call search_images first to find reference material. NEVER embed raw images from search_images directly, as they are often messy video screenshots (e.g., showing the professor's face). Instead, if you find a relevant match, extract its exact logical structure or data, and call generate_diagram with LaTeX/TikZ to render a clean, synthetic version of it. If no match exists but the question needs a diagram
     specific to this question's own data (e.g. "the state machine after applying
     these exact inputs", "this exact architecture layout"), work out
-    the exact correct structure yourself first, then call generate_diagram
+    the exact correct structure yourself first, paying close attention to the 
+    domain semantics of the subject (e.g. use DIRECTED graphs for data structures, precise logic 
+    gates for circuits, proper ER symbols for DBMS, etc). Then call generate_diagram
     with LaTeX/TikZ to render it precisely - only do this once you already
     know the structure is correct, since it will faithfully draw whatever
     you give it, and always pass a complete ground_truth (every node/edge or

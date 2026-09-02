@@ -12,8 +12,9 @@ revise_teaching_material_task:
     something not covered by the syllabus index, say so instead of
     filling it in. If a change needs a new diagram, call search_images
     first and only call generate_diagram for one specific to an example
-    you're constructing with an already-known-correct structure - never
-    fabricate one.
+    you're constructing with an already-known-correct structure, paying 
+    close attention to domain semantics (use DIRECTED graphs for CT, 
+    proper ER symbols for DBMS, etc) - never fabricate one.
 
     --- EXISTING TEACHING MATERIAL ---
     {existing_material_content}

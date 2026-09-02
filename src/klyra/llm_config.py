@@ -41,6 +41,28 @@ def default_llm():
     )
 
 
+def coding_llm():
+    from crewai import LLM
+
+    model = os.environ.get("KLYRA_CODING_LLM_MODEL", "gemini/gemini-3.5-flash-lite")
+    timeout_ms = int(float(os.environ.get("KLYRA_LLM_TIMEOUT_SECONDS", "30")) * 1000)
+    retry_attempts = int(os.environ.get("KLYRA_LLM_RETRY_ATTEMPTS", "10"))
+    
+    return LLM(
+        model=model,
+        client_params={
+            "http_options": {
+                "timeout": timeout_ms,
+                "retry_options": {
+                    "attempts": retry_attempts,
+                    "initial_delay": 2.0,
+                    "max_delay": 65.0,
+                },
+            }
+        },
+    )
+
+
 def default_embedder():
     import os
 

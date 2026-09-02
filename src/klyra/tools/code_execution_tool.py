@@ -47,6 +47,7 @@ CPU_LIMIT = "1"
 PIDS_LIMIT = "64"
 
 BASH_RUNNER_IMAGE = "klyra-bash-runner:latest"
+PYTHON_POSTGRES_RUNNER_IMAGE = "klyra-python-postgres-runner:latest"
 
 
 class DockerNotAvailableError(RuntimeError):
@@ -77,13 +78,13 @@ LANGUAGE_RUNNERS: dict[str, LanguageRunner] = {
     "c": LanguageRunner(
         image="gcc:13-bookworm",
         filename="solution.c",
-        compile_cmd=["gcc", "-O2", "-o", "solution", "solution.c"],
+        compile_cmd=["gcc", "-O2", "-o", "solution", "solution.c", "-lm"],
         run_cmd=["./solution"],
     ),
     "cpp": LanguageRunner(
         image="gcc:13-bookworm",
         filename="solution.cpp",
-        compile_cmd=["g++", "-O2", "-std=c++17", "-o", "solution", "solution.cpp"],
+        compile_cmd=["g++", "-O2", "-std=c++17", "-o", "solution", "solution.cpp", "-lm"],
         run_cmd=["./solution"],
     ),
     "bash": LanguageRunner(
@@ -91,6 +92,24 @@ LANGUAGE_RUNNERS: dict[str, LanguageRunner] = {
         filename="solution.sh",
         compile_cmd=None,
         run_cmd=["bash", "solution.sh"],
+    ),
+    "sql": LanguageRunner(
+        image=BASH_RUNNER_IMAGE,
+        filename="solution.sql",
+        compile_cmd=None,
+        run_cmd=["sh", "-c", "cat - solution.sql | sqlite3 test.db"],
+    ),
+    "postgresql": LanguageRunner(
+        image="postgres:16-alpine",
+        filename="solution.sql",
+        compile_cmd=None,
+        run_cmd=["sh", "-c", "mkdir -p /tmp/pgdata && chown postgres:postgres /tmp/pgdata && su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1 && su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1 && cat - solution.sql | su-exec postgres psql -q -d postgres"],
+    ),
+    "python-db": LanguageRunner(
+        image="klyra-python-postgres-runner:latest",
+        filename="solution.py",
+        compile_cmd=None,
+        run_cmd=["sh", "-c", "mkdir -p /tmp/pgdata && chown postgres:postgres /tmp/pgdata && su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1 && su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1 && cat - > schema.sql && su-exec postgres psql -q -d postgres -f schema.sql >/dev/null 2>&1 && python3 solution.py"],
     ),
 }
 
@@ -130,6 +149,17 @@ def _bash_runner_dockerfile() -> Path | None:
     return None
 
 
+def _python_postgres_runner_dockerfile() -> Path | None:
+    candidates = [
+        Path(__file__).resolve().parents[3] / "docker" / "python-postgres-runner.Dockerfile",
+        Path.cwd() / "docker" / "python-postgres-runner.Dockerfile",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 def _image_exists(image: str) -> bool:
     docker_bin = _docker_path()
     try:
@@ -147,43 +177,46 @@ def ensure_language_image(language: str) -> str | None:
     """Make sure a locally-built runner image exists. Returns an error
     message if it can't, or None if the language uses a public image / the
     local image is already present / was just built.
-
-    `klyra-bash-runner:latest` is not on Docker Hub. A bare `docker run`
-    would try to pull it and fail with 'pull access denied' (exit 125).
     """
-    if language.strip().lower() != "bash":
-        return None
-    if _image_exists(BASH_RUNNER_IMAGE):
+    language = language.strip().lower()
+    
+    if language in ("bash", "sql"):
+        image_name = BASH_RUNNER_IMAGE
+        dockerfile_func = _bash_runner_dockerfile
+    elif language == "python-db":
+        image_name = PYTHON_POSTGRES_RUNNER_IMAGE
+        dockerfile_func = _python_postgres_runner_dockerfile
+    else:
         return None
 
-    dockerfile = _bash_runner_dockerfile()
-    if dockerfile is None:
-        return (
-            f"Bash runner image {BASH_RUNNER_IMAGE} is not built and "
-            "docker/bash-runner.Dockerfile was not found. Build it once from "
-            "the repo root:\n"
-            "  docker build -t klyra-bash-runner:latest -f docker/bash-runner.Dockerfile docker/"
-        )
+    if _image_exists(image_name):
+        return None
+
+    dockerfile = dockerfile_func()
+    if not dockerfile:
+        return f"Cannot build {image_name}: Dockerfile not found."
 
     docker_bin = _docker_path()
     try:
-        result = subprocess.run(
+        build_result = subprocess.run(
             [
-                docker_bin, "build",
-                "-t", BASH_RUNNER_IMAGE,
-                "-f", str(dockerfile),
+                docker_bin,
+                "build",
+                "-t",
+                image_name,
+                "-f",
+                str(dockerfile),
                 str(dockerfile.parent),
             ],
             capture_output=True,
-            text=True,
-            timeout=300,
+            timeout=120,
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return f"Failed to build {BASH_RUNNER_IMAGE}: {exc}"
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()[-2000:]
-        return f"Failed to build {BASH_RUNNER_IMAGE}:\n{detail}"
-    return None
+        if build_result.returncode != 0:
+            err = build_result.stderr.decode(errors="replace")
+            return f"Failed to build {image_name}. Docker build error:\n{err}"
+        return None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return f"Failed to run docker build for {image_name}: {e}"
 
 
 @dataclass
@@ -201,6 +234,7 @@ def _docker_run(
     container with `workdir` bind-mounted at /sandbox (also its cwd)."""
     docker_bin = _docker_path()
     container_name = f"klyra-run-{uuid.uuid4().hex[:12]}"
+    
     full_cmd = [
         docker_bin, "run", "--rm", "--name", container_name,
         "--network", "none",

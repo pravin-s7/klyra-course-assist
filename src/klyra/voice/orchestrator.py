@@ -17,11 +17,19 @@ import json
 import logging
 import os
 import sys
+import socket
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# Fix IPv6 websocket handshake timeout on some Linux/WSL systems
+_old_getaddrinfo = socket.getaddrinfo
+def _ipv4_only_getaddrinfo(*args, **kwargs):
+    responses = _old_getaddrinfo(*args, **kwargs)
+    return [r for r in responses if r[0] == socket.AF_INET] or responses
+socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 # Defaults (overridable via env vars)
 _DEFAULT_MODEL = "gemini-2.0-flash-exp"
@@ -151,6 +159,7 @@ class VoiceOrchestrator:
             )
 
         self._client = genai.Client(api_key=api_key)
+        
         self._executor = ToolExecutor()
 
         # Start audio transport
@@ -298,7 +307,7 @@ class VoiceOrchestrator:
                 chunk = await self._transport.read_chunk()
                 if chunk:
                     await session.send_realtime_input(
-                        audio={"data": chunk, "mime_type": "audio/pcm"}
+                        audio={"data": chunk, "mime_type": "audio/pcm;rate=16000"}
                     )
             except asyncio.CancelledError:
                 raise

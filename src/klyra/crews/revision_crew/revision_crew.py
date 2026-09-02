@@ -15,7 +15,7 @@ from crewai.project import CrewBase, agent, crew, task
 
 from klyra.llm_config import default_llm, default_embedder
 from klyra.tools.image_tools import SearchImagesTool
-from klyra.tools.latex_diagram_tool import GenerateDiagramTool
+from klyra.tools.latex_diagram_tool import GenerateDiagramTool, GenerateGraphTool
 from klyra.tools.syllabus_tools import (
     FetchPyqChunksTool,
     ListSourceFilesTool,
@@ -45,7 +45,7 @@ class RevisionCrew:
                 FetchPyqChunksTool(),
                 ListSourceFilesTool(),
                 SearchImagesTool(),
-                GenerateDiagramTool(),
+                GenerateDiagramTool(), GenerateGraphTool(),
             ],
             llm=default_llm(),
             verbose=True,
@@ -63,6 +63,6 @@ class RevisionCrew:
             tasks=self.tasks,
             process=Process.sequential,
             verbose=True,
-            memory=True,
+            memory=False,
             embedder=default_embedder(),
         )

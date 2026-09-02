@@ -194,6 +194,7 @@ Agents use these tools to interact with the outside world:
 | **LLM** | Gemini (via LiteLLM) | Default: `gemini-3.1-flash-lite` (configurable via `KLYRA_LLM_MODEL`) |
 | **Embeddings** | Gemini Embedding | `gemini-embedding-2` (or OpenAI `text-embedding-3-small`) |
 | **Job Store** | SQLite / PostgreSQL | Job records: status, result, error, timestamps |
+| **Chat Sessions** | `.db` (JSON) / PostgreSQL | Local chat history is stored in lightweight `.db/sessions/` JSON files. In production, this shifts to PostgreSQL to handle concurrent users (see SaaS section). |
 | **Queue** | Redis | Celery broker + result backend (API mode only) |
 | **Filesystem** | `docs/<subject>/` | Source materials (`week_1/`–`week_12/`, `pyq/`, `additional/`) and generated outputs (`generated/`) |
 | **Code Sandbox** | Docker | Network-disabled containers for code validation |
@@ -448,12 +449,19 @@ If you plan to transition Klyra from a single-tenant tool to a **paid SaaS produ
 
 Below is the architectural plan to implement user-based API keys with per-service usage limits.
 
-### 1. Database Schema Updates
-Move beyond the current `jobs` table by adding user identity and billing tracking (using PostgreSQL):
+### 1. Database Schema Updates & Storage Choices (Postgres vs NoSQL)
+Move beyond the current `jobs` table and local `.db` JSON session files by adding user identity, billing tracking, and session tracking.
 
+**Why PostgreSQL for Production?**
+While NoSQL databases (like MongoDB) are often praised for chat applications due to their document-oriented flexibility, **PostgreSQL is heavily recommended for Klyra in production.**
+*   **JSONB Support:** Postgres offers robust `JSONB` columns, giving you the exact same schema-less flexibility as NoSQL for storing varying Gemini message histories.
+*   **Relational Integrity:** Unlike pure NoSQL, Postgres allows you to enforce strict relational integrity for your SaaS elements (Users, Subscriptions, Workspaces, Quotas, and API Keys).
+*   **Simplified Stack:** Since Klyra already uses Postgres/SQLite for its Job queue via SQLAlchemy, adding a `sessions` table to Postgres keeps your infrastructure footprint small and highly cohesive.
+
+**Proposed Tables:**
 - **`users`**: `id`, `email`, `stripe_customer_id`, `subscription_tier` (e.g., Free, Pro, Enterprise).
-- **`api_keys`**: `id`, `user_id`, `key_prefix`, `hashed_key` (never store raw API keys; store SHA-256 hashes like passwords), `is_active`.
-- **`usage_logs`**: (Optional for analytics) `id`, `user_id`, `service_name`, `tokens_used`, `timestamp`.
+- **`api_keys`**: `id`, `user_id`, `key_prefix`, `hashed_key`.
+- **`sessions`**: `id`, `user_id`, `title`, `history` (JSONB column containing the `ChatOrchestrator` interaction history).
 
 ### 2. Redis Quota Tracking (Token Bucket)
 Since Klyra already uses Redis for Celery, leverage it to track API limits quickly without overwhelming Postgres.

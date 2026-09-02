@@ -15,7 +15,7 @@ from crewai import Agent, Crew, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 
-from klyra.llm_config import default_llm, default_embedder
+from klyra.llm_config import default_llm, default_embedder, coding_llm
 from klyra.tools.code_execution_tool import RunCodeTool
 from klyra.tools.coding_source_tool import SearchCodingSourcesTool
 from klyra.tools.leetcode_tool import SearchLeetCodeTool
@@ -46,7 +46,7 @@ class CodingRevisionCrew:
                 WriteCodingPackageTool(),
                 WriteSubjectFileTool(),
             ],
-            llm=default_llm(),
+            llm=coding_llm(),
             verbose=True,
         )
 
@@ -62,6 +62,6 @@ class CodingRevisionCrew:
             tasks=self.tasks,
             process=Process.sequential,
             verbose=True,
-            memory=True,
+            memory=False,
             embedder=default_embedder(),
         )

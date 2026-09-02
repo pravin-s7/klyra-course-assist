@@ -18,7 +18,7 @@ from klyra.tools.format_conversion import (
     FormatLatexAsExamTool,
 )
 from klyra.tools.image_tools import SearchImagesTool
-from klyra.tools.latex_diagram_tool import GenerateDiagramTool
+from klyra.tools.latex_diagram_tool import GenerateDiagramTool, GenerateGraphTool
 
 
 @CrewBase
@@ -39,7 +39,7 @@ class FormatConverterCrew:
                 ConvertMarkdownToLatexTool(),
                 ConvertLatexToMarkdownTool(),
                 SearchImagesTool(),
-                GenerateDiagramTool(),
+                GenerateDiagramTool(), GenerateGraphTool(),
                 ReplaceInGeneratedFileTool(),
                 FormatLatexAsExamTool(),
             ],

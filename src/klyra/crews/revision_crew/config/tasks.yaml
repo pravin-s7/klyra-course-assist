@@ -23,7 +23,9 @@ revise_qp_task:
     logic circuit, state machine, architecture diagram, flow chart, etc.), call search_images
     first and embed a genuinely relevant result; if none exists and the
     diagram is specific to this question's own data, work out the correct
-    structure yourself and call generate_diagram (LaTeX/TikZ) to render it,
+    structure yourself, paying close attention to the domain semantics of the subject 
+    (e.g. use DIRECTED graphs for CT, precise logic gates for circuits, proper ER 
+    symbols for DBMS, etc). Then call generate_diagram (LaTeX/TikZ) to render it,
     always passing a complete ground_truth (every node/edge/cell) since
     review/solve agents cannot see the rendered image - never fabricate a
     diagram reference, and never guess the structure before calling
