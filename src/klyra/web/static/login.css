@@ -1,0 +1,134 @@
+/* ── Login overlay (RBAC) ───────────────────────────────────────── */
+.login-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+}
+
+.login-card {
+    width: min(360px, 90vw);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px 28px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+}
+
+.login-card h1 {
+    text-align: center;
+    margin: 8px 0 4px;
+    font-size: 22px;
+    color: var(--text-primary);
+}
+
+.login-logo {
+    text-align: center;
+    font-size: 32px;
+    color: var(--accent);
+}
+
+.login-sub {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    margin: 0 0 20px;
+}
+
+.login-card .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+
+.login-card label {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.login-card input {
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+}
+
+.login-card input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.login-error {
+    color: var(--error);
+    font-size: 13px;
+    margin: 0 0 10px;
+}
+
+.login-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+    margin: 6px 0 14px;
+}
+
+.login-divider::before,
+.login-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+}
+
+.google-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.google-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+
+/* ── Header user badge ──────────────────────────────────────────── */
+.user-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.user-badge .user-name {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+

@@ -32,7 +32,7 @@ def _ipv4_only_getaddrinfo(*args, **kwargs):
 socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 # Defaults (overridable via env vars)
-_DEFAULT_MODEL = "gemini-2.0-flash-exp"
+_DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 _DEFAULT_VOICE = "Puck"
 _RECONNECT_DELAY_SECONDS = 2
 _MAX_RECONNECT_ATTEMPTS = 5
@@ -199,6 +199,17 @@ class VoiceOrchestrator:
                     ],
                 )
 
+                # Patch IPv4 for asyncio to avoid IPv6 WSL timeouts
+                loop = asyncio.get_running_loop()
+                if not hasattr(loop, "_ipv4_patched"):
+                    orig_getaddrinfo = loop.getaddrinfo
+                    async def _ipv4_getaddrinfo(*args, **kwargs):
+                        import socket
+                        res = await orig_getaddrinfo(*args, **kwargs)
+                        return [r for r in res if r[0] == socket.AF_INET] or res
+                    loop.getaddrinfo = _ipv4_getaddrinfo
+                    loop._ipv4_patched = True
+
                 try:
                     await self._session_loop(config)
                 except Exception as exc:
@@ -288,14 +299,35 @@ class VoiceOrchestrator:
                     except (asyncio.CancelledError, Exception):
                         pass
 
-                # Re-raise any exception from completed tasks
+                # Collect exceptions from completed tasks (retrieves them
+                # so Python won't print "Task exception was never retrieved")
+                real_exc = None
                 for task in done:
-                    exc = task.exception()
+                    try:
+                        exc = task.exception()
+                    except asyncio.CancelledError:
+                        continue
                     if exc is not None:
-                        raise exc
+                        # APIError "1000" is just a normal WebSocket close — harmless
+                        exc_str = str(exc).strip()
+                        if exc_str in ("1000 None.", "1000", "1") or "1000" in exc_str:
+                            logger.debug("Session closed normally (1000)")
+                            continue
+                        if real_exc is None:
+                            real_exc = exc
+                if real_exc is not None:
+                    raise real_exc
             except asyncio.CancelledError:
                 pass
             finally:
+                # Ensure we retrieve exceptions from tasks to prevent
+                # "Task exception was never retrieved" warnings
+                for task in [input_task, output_task]:
+                    if task.done() and not task.cancelled():
+                        try:
+                            task.exception()
+                        except (asyncio.CancelledError, Exception):
+                            pass
                 self._session = None
 
     # ── Audio streaming ─────────────────────────────────────────────

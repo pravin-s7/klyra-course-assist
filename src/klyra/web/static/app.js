@@ -52,18 +52,141 @@ const newChatBtn = document.getElementById('newChatBtn');
 const themeToggleBtn = document.getElementById('themeToggleBtn');
 const chatSessionsList = document.getElementById('chatSessionsList');
 
+// ── Auth gate (RBAC) ─────────────────────────────────────────────
+// Shows the login overlay when there's no valid session; only after a
+// successful auth check do we open the WebSocket and load data.
+let currentUser = null;
+
+function showLogin() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.style.display = 'flex';
+}
+
+function showUserBadge(user) {
+    const badge = document.getElementById('userBadge');
+    const nameEl = document.getElementById('userDisplayName');
+    if (!badge || !nameEl) return;
+    const displayName = user.full_name || user.username;
+    nameEl.textContent = `${displayName} (${user.role})`;
+    nameEl.title = user.role === 'admin'
+        ? 'Admin — access to all courses'
+        : 'Courses: ' + ((user.courses || []).join(', ') || 'none assigned');
+    badge.style.display = 'flex';
+
+    // Admins get a link to the user-management panel
+    let adminLink = document.getElementById('adminPanelLink');
+    if (user.role === 'admin' && !adminLink) {
+        adminLink = document.createElement('a');
+        adminLink.id = 'adminPanelLink';
+        adminLink.href = '/admin';
+        adminLink.className = 'action-btn';
+        adminLink.title = 'Admin panel';
+        adminLink.style.marginRight = '4px';
+        adminLink.style.textDecoration = 'none';
+        adminLink.innerHTML =
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+            'stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect>' +
+            '<rect x="14" y="3" width="7" height="7"></rect>' +
+            '<rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>';
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (logoutBtn && logoutBtn.parentElement) {
+            logoutBtn.parentElement.insertBefore(adminLink, logoutBtn);
+        }
+    }
+}
+
+async function initAuth() {
+    try {
+        const resp = await fetch('/api/auth/me');
+        if (resp.ok) {
+            currentUser = await resp.json();
+            showUserBadge(currentUser);
+            return true;
+        }
+    } catch (err) {
+        console.error('Auth check failed:', err);
+    }
+    showLogin();
+    // Show the Google button only when OAuth is configured server-side
+    fetch('/api/auth/google/status')
+        .then((r) => (r.ok ? r.json() : { enabled: false }))
+        .then((data) => {
+            if (data.enabled) {
+                const btn = document.getElementById('googleBtn');
+                const divider = document.getElementById('googleDivider');
+                if (btn) btn.style.display = 'flex';
+                if (divider) divider.style.display = 'flex';
+            }
+        })
+        .catch(() => {});
+    return false;
+}
+
+function bindAuthUI() {
+    const form = document.getElementById('loginForm');
+    if (form) {
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('loginSubmitBtn');
+            const errEl = document.getElementById('loginError');
+            const username = document.getElementById('loginUsername').value.trim();
+            const password = document.getElementById('loginPassword').value;
+            btn.disabled = true;
+            errEl.style.display = 'none';
+            try {
+                const resp = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                if (resp.ok) {
+                    location.reload();  // cookie set — reload into the app
+                    return;
+                }
+                const data = await resp.json().catch(() => ({}));
+                errEl.textContent = data.detail || 'Login failed';
+                errEl.style.display = 'block';
+            } catch (err) {
+                errEl.textContent = 'Login failed: ' + err.message;
+                errEl.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    }
+
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', async () => {
+            try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (err) {}
+            localStorage.removeItem(sessionStorageKey());
+            location.reload();
+        });
+    }
+}
+bindAuthUI();
+
 // ── WebSocket ─────────────────────────────────────────────────────
+// The chat session id is kept PER-USER so logging in as another user on
+// the same browser starts a fresh chat instead of reusing the previous
+// user's privately-owned session (which the server rejects with 4403).
+function sessionStorageKey() {
+    const uid = (currentUser && currentUser.id) || 'anon';
+    return 'klyra_session_id_' + uid;
+}
+
 function getSessionId() {
-    let sid = localStorage.getItem('klyra_session_id');
+    const key = sessionStorageKey();
+    let sid = localStorage.getItem(key);
     if (!sid) {
         sid = Math.random().toString(36).substring(2) + Date.now().toString(36);
-        localStorage.setItem('klyra_session_id', sid);
+        localStorage.setItem(key, sid);
     }
     return sid;
 }
 
 function switchSession(sid) {
-    localStorage.setItem('klyra_session_id', sid);
+    localStorage.setItem(sessionStorageKey(), sid);
     
     // Clear the chat UI locally
     messages.innerHTML = '';
@@ -748,7 +871,7 @@ uploadForm.addEventListener('submit', async (e) => {
 });
 
 function updateThemeIcon() {
-    const isLight = document.documentElement.classList.contains('light');
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
     const icon = document.getElementById('themeIcon');
     if (icon) {
         if (isLight) {
@@ -763,9 +886,10 @@ function updateThemeIcon() {
 updateThemeIcon();
 
 themeToggleBtn.addEventListener('click', () => {
-    document.documentElement.classList.toggle('light');
-    const isLight = document.documentElement.classList.contains('light');
-    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+    const current = document.documentElement.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('klyra_theme', next);
     updateThemeIcon();
 });
 
@@ -774,8 +898,8 @@ if (newSessionBtn) {
 }
 
 function clearChat() {
-    // Clear backend chat history and local session ID
-    localStorage.removeItem('klyra_session_id');
+    // Clear backend chat history and local session ID (per-user)
+    localStorage.removeItem(sessionStorageKey());
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'clear_chat' }));
         ws.close(); // Force reconnect to get a fresh session
@@ -1240,6 +1364,10 @@ if (newChatBtn) {
     });
 }
 
-connect();
-fetchSubjects();
-fetchSessions();
+initAuth().then((ok) => {
+    if (ok) {
+        connect();
+        fetchSubjects();
+        fetchSessions();
+    }
+});

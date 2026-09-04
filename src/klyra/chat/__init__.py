@@ -41,12 +41,18 @@ class ChatOrchestrator:
         on_tool_done=None,
         on_file_link=None,
         on_tool_log=None,
+        allowed_subjects: set[str] | None = None,
+        user_id: str | None = None,
     ):
         self._on_text = on_text
         self._on_tool_start = on_tool_start
         self._on_tool_done = on_tool_done
         self._on_file_link = on_file_link
         self._on_tool_log = on_tool_log
+        # RBAC: None → unrestricted (admin/CLI); otherwise tool calls are
+        # limited to these subjects (courses). user_id tags generated files.
+        self._allowed_subjects = allowed_subjects
+        self._user_id = user_id
         self._model = os.environ.get("KLYRA_CHAT_MODEL", _DEFAULT_CHAT_MODEL)
         self._client = None
         self._chat = None
@@ -67,7 +73,10 @@ class ChatOrchestrator:
             raise SystemExit("GEMINI_API_KEY (or GOOGLE_API_KEY) must be set in your .env file.")
 
         self._client = genai.Client(api_key=api_key)
-        self._executor = ToolExecutor(on_log_callback=self._on_tool_log)
+        self._executor = ToolExecutor(
+            on_log_callback=self._on_tool_log,
+            allowed_subjects=self._allowed_subjects,
+        )
 
         decls = get_all_declarations()
         func_decls = [types.FunctionDeclaration(**d) for d in decls]
@@ -201,6 +210,13 @@ class ChatOrchestrator:
             for f in docs_dir.rglob("*"):
                 if f.is_file() and (now - f.stat().st_mtime) < 60:
                     rel_path = f.relative_to(Path("docs"))
+                    # Tag ownership so other users can't read this file (RBAC)
+                    if self._user_id:
+                        try:
+                            from klyra.storage import repo as _repo
+                            _repo.set_file_owner(rel_path.as_posix(), self._user_id, subject)
+                        except Exception:
+                            pass
                     if self._on_file_link:
                         await _maybe_await(
                             self._on_file_link(

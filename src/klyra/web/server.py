@@ -1,6 +1,15 @@
 """Klyra Web Server — FastAPI with WebSocket for chat + voice.
 
 Run with ``klyra web`` or ``uvicorn klyra.web.server:app``.
+
+RBAC (Phase 1):
+- All /api/* routes and /ws require a logged-in user (session cookie).
+- Chat sessions are owned by users: users see/edit/delete only their own
+  chats; admins see all.
+- Subject (course) gating: uploads, index listing/deletion, downloads, and
+  /api/subjects are limited to the user's assigned courses (admin: all).
+- Generated-file access (/files/..., /api/download/...) additionally checks
+  the file-ownership registry for files under {subject}/generated/.
 """
 from __future__ import annotations
 
@@ -15,7 +24,7 @@ import socket
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from pydantic import BaseModel
 from fastapi.background import BackgroundTasks
@@ -31,12 +40,29 @@ def _ipv4_only_getaddrinfo(*args, **kwargs):
     return [r for r in responses if r[0] == socket.AF_INET] or responses
 socket.getaddrinfo = _ipv4_only_getaddrinfo
 
-app = FastAPI(title="Klyra Web", version="0.1.0")
+from klyra.auth.bootstrap import ensure_bootstrap
+from klyra.auth.dependencies import (
+    can_access_subject,
+    can_read_generated_file,
+    get_current_user,
+    websocket_user,
+)
+from klyra.auth.google_oauth import router as google_oauth_router
+from klyra.auth.routes import router as auth_router
+from klyra.storage import repo
+from klyra.storage.models import UserRecord
+from klyra.web.admin_routes import router as admin_router
 
+# First-run: create tables, seed admin, migrate legacy JSON sessions.
 _STATIC_DIR = Path(__file__).parent / "static"
 _DOCS_DIR = Path.cwd() / "docs"
-SESSIONS_DIR = Path.cwd() / ".db" / "sessions"
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+_LEGACY_SESSIONS_DIR = Path.cwd() / ".db" / "sessions"
+ensure_bootstrap(_LEGACY_SESSIONS_DIR)
+
+app = FastAPI(title="Klyra Web", version="0.1.0")
+app.include_router(auth_router)
+app.include_router(google_oauth_router)
+app.include_router(admin_router)
 
 
 # ── Static file serving ────────────────────────────────────────────
@@ -45,6 +71,13 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 async def index():
     """Serve the main chat UI."""
     html_path = _STATIC_DIR / "index.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/admin")
+async def admin_page():
+    """Serve the user-management admin panel (API itself enforces admin)."""
+    html_path = _STATIC_DIR / "admin.html"
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
@@ -69,11 +102,17 @@ async def static_file(filename: str):
 
 
 @app.get("/files/{path:path}")
-async def serve_file(path: str, preview: bool = False):
-    """Serve generated files for download or preview."""
+async def serve_file(path: str, preview: bool = False, user: UserRecord = Depends(get_current_user)):
+    """Serve generated files for download or preview (owner/course gated)."""
     file_path = (_DOCS_DIR / path).resolve()
     if not str(file_path).startswith(str(_DOCS_DIR.resolve())):
         return Response(status_code=403)
+
+    # Access check BEFORE existence so we don't leak whether another
+    # user's generated file exists.
+    if not can_read_generated_file(user, path):
+        return Response(status_code=403, content="You do not have access to this file")
+
     if not file_path.exists() or not file_path.is_file():
         return Response(status_code=404)
 
@@ -92,27 +131,36 @@ async def serve_file(path: str, preview: bool = False):
 
 
 @app.post("/api/upload/{subject}/{category}")
-async def upload_files(subject: str, category: str, background_tasks: BackgroundTasks, files: list[UploadFile] = File(...)):
-    """Upload files and trigger background ingestion."""
+async def upload_files(
+    subject: str,
+    category: str,
+    background_tasks: BackgroundTasks,
+    user: UserRecord = Depends(get_current_user),
+    files: list[UploadFile] = File(...),
+):
+    """Upload files and trigger background ingestion (course-gated)."""
     from klyra.services.ingestion_service import run_ingestion
     from klyra.utils.fs import validate_subject
+
+    if not can_access_subject(user, subject):
+        return Response(status_code=403, content="You are not assigned to this course")
 
     try:
         subject = validate_subject(subject)
     except ValueError as e:
         return Response(status_code=400, content=str(e))
-    
+
     # Map category to actual directory path inside subject
     cat_path_map = {
         "pyq": "pyq",
         "transcripts": "transcripts",
         "additional": "additional",
     }
-    
+
     dir_name = cat_path_map.get(category, category) # handles week_X
     target_dir = _DOCS_DIR / subject / dir_name
     target_dir.mkdir(parents=True, exist_ok=True)
-    
+
     task_id = str(uuid.uuid4())
     background_tasks_state[task_id] = {"status": "running", "progress": 0, "message": "Starting ingestion...", "logs": ""}
 
@@ -126,7 +174,7 @@ async def upload_files(subject: str, category: str, background_tasks: Background
                 files_copied.append(file_path)
     except Exception as e:
         return Response(status_code=500, content=f"Upload failed: {e}")
-    
+
     # Trigger indexing in background
     def ingest_background():
         with background_logger(task_id, background_tasks_state):
@@ -142,7 +190,7 @@ async def upload_files(subject: str, category: str, background_tasks: Background
             except Exception as e:
                 logger.error(f"Ingestion failed for {subject}/{category}: {e}")
                 background_tasks_state[task_id] = {"status": "error", "progress": 0, "message": f"Ingestion failed: {e}", "logs": background_tasks_state[task_id].get("logs", "")}
-                
+
                 # Rollback uploaded files
                 print(f"Rolling back {len(files_copied)} physical files due to ingestion error...")
                 for f in files_copied:
@@ -150,16 +198,16 @@ async def upload_files(subject: str, category: str, background_tasks: Background
                         f.unlink(missing_ok=True)
                     except Exception as ex:
                         print(f"Failed to delete {f} during rollback: {ex}")
-                
+
                 # Cleanup empty parent dir
                 if not any(target_dir.iterdir()):
                     try:
                         target_dir.rmdir()
                     except:
                         pass
-            
+
     background_tasks.add_task(ingest_background)
-    
+
     return {"message": "Files uploaded successfully. Indexing started.", "task_id": task_id}
 
 
@@ -199,7 +247,7 @@ def background_logger(task_id: str, state_dict: dict):
         root_logger.removeHandler(log_handler)
 
 @app.get("/api/tasks/{task_id}")
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, user: UserRecord = Depends(get_current_user)):
     return background_tasks_state.get(task_id, {"status": "unknown"})
 
 class DeleteRequest(BaseModel):
@@ -207,80 +255,96 @@ class DeleteRequest(BaseModel):
     items: list[str]
 
 @app.get("/api/subjects")
-def get_subjects():
-    """Return a list of available subjects in the docs directory."""
-    subjects = []
-    if _DOCS_DIR.exists():
-        for p in _DOCS_DIR.iterdir():
-            if p.is_dir() and not p.name.startswith("."):
-                subjects.append(p.name)
-    return {"subjects": sorted(subjects)}
+def get_subjects(user: UserRecord = Depends(get_current_user)):
+    """Return the subjects the user may work with (admin: all on disk)."""
+    if user.role == "admin":
+        subjects = []
+        if _DOCS_DIR.exists():
+            for p in _DOCS_DIR.iterdir():
+                if p.is_dir() and not p.name.startswith("."):
+                    subjects.append(p.name)
+        return {"subjects": sorted(subjects)}
+    return {"subjects": sorted(repo.user_courses(user))}
 
 @app.get("/api/sessions")
-def get_sessions():
-    """Return a list of saved sessions."""
-    sessions = []
-    if SESSIONS_DIR.exists():
-        for f in SESSIONS_DIR.glob("*.json"):
-            try:
-                with open(f, "r", encoding="utf-8") as file:
-                    data = json.load(file)
-                    sessions.append({
-                        "id": data.get("session_id"),
-                        "title": data.get("title", "New Chat"),
-                        "created_at": data.get("created_at", 0),
-                        "pinned": data.get("pinned", False)
-                    })
-            except Exception:
-                pass
-    # Sort by pinned (True first), then created_at descending
-    sessions.sort(key=lambda x: (not x.get("pinned", False), -x["created_at"]))
+def get_sessions(user: UserRecord = Depends(get_current_user)):
+    """Return the user's own chat sessions (admin uses /api/admin/ for others')."""
+    records = repo.list_chat_sessions(owner_id=user.id)
+    sessions = [
+        {
+            "id": r.session_id,
+            "title": r.title,
+            "created_at": r.created_at,
+            "pinned": r.pinned,
+        }
+        for r in records
+    ]
+    # Pinned first, then newest first (created_at is an ISO-8601 string,
+    # so lexicographic ordering == chronological ordering). Two stable
+    # sorts: newest-first, then pinned-first.
+    sessions.sort(key=lambda x: x["created_at"], reverse=True)
+    sessions.sort(key=lambda x: x.get("pinned", False), reverse=True)
     return {"sessions": sessions}
 
 class SessionUpdateRequest(BaseModel):
     title: str | None = None
     pinned: bool | None = None
 
+def _own_session_or_404(session_id: str, user: UserRecord):
+    record = repo.get_chat_session(session_id)
+    if record is None:
+        return None, Response(status_code=404, content="Session not found")
+    if record.owner_id != user.id and user.role != "admin":
+        return None, Response(status_code=403, content="You do not own this chat")
+    return record, None
+
 @app.put("/api/sessions/{session_id}")
-def update_session(session_id: str, req: SessionUpdateRequest):
-    """Update a saved session (rename or pin)."""
-    p = SESSIONS_DIR / f"{session_id}.json"
-    if p.exists():
-        with open(p, "r", encoding="utf-8") as file:
-            data = json.load(file)
-        
-        if req.title is not None:
-            data["title"] = req.title
-        if req.pinned is not None:
-            data["pinned"] = req.pinned
-            
-        with open(p, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=2)
-            
-        return {"status": "success", "session": data}
-    return Response(status_code=404, content="Session not found")
+def update_session(session_id: str, req: SessionUpdateRequest, user: UserRecord = Depends(get_current_user)):
+    """Update one of the user's sessions (rename or pin)."""
+    record, err = _own_session_or_404(session_id, user)
+    if err is not None:
+        return err
+
+    if req.title is not None:
+        repo.rename_chat_session(session_id, req.title)
+    if req.pinned is not None:
+        repo.set_chat_session_pinned(session_id, req.pinned)
+
+    updated = repo.get_chat_session(session_id)
+    return {
+        "status": "success",
+        "session": {
+            "id": updated.session_id,
+            "title": updated.title,
+            "pinned": updated.pinned,
+            "created_at": updated.created_at,
+        } if updated else {"id": session_id},
+    }
 
 @app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str):
-    """Delete a saved session."""
-    p = SESSIONS_DIR / f"{session_id}.json"
-    if p.exists():
-        p.unlink()
+def delete_session(session_id: str, user: UserRecord = Depends(get_current_user)):
+    """Delete one of the user's sessions."""
+    record, err = _own_session_or_404(session_id, user)
+    if err is not None:
+        return err
+    repo.delete_chat_session(session_id)
     if session_id in ACTIVE_SESSIONS:
         del ACTIVE_SESSIONS[session_id]
     return {"status": "success"}
 
 @app.get("/api/index/{subject}")
-async def list_index(subject: str):
+async def list_index(subject: str, user: UserRecord = Depends(get_current_user)):
+    if not can_access_subject(user, subject):
+        return Response(status_code=403, content="You are not assigned to this course")
     from klyra.utils.fs import discover_subject_files
     try:
         sources = discover_subject_files(subject)
     except FileNotFoundError:
         return {"folders": [], "files": []}
-        
+
     folders = set()
     files = []
-    
+
     source_dir = Path("docs") / subject
     for s in sources:
         files.append(str(s.path.resolve()))
@@ -290,14 +354,21 @@ async def list_index(subject: str):
                 folders.add(rel.parts[0])
         except ValueError as e:
             logger.error(f"ValueError relative_to. s.path={s.path}, source_dir={source_dir}")
-            
+
     return {"folders": sorted(list(folders)), "files": sorted(files)}
 
 @app.post("/api/index/{subject}/delete")
-async def delete_index(subject: str, req: DeleteRequest, background_tasks: BackgroundTasks):
+async def delete_index(
+    subject: str,
+    req: DeleteRequest,
+    background_tasks: BackgroundTasks,
+    user: UserRecord = Depends(get_current_user),
+):
+    if not can_access_subject(user, subject):
+        return Response(status_code=403, content="You are not assigned to this course")
     from klyra.utils.fs import discover_subject_files
     from klyra.services.ingestion_service import run_ingestion
-    
+
     files_to_delete = []
     if req.type == "folders":
         try:
@@ -314,7 +385,7 @@ async def delete_index(subject: str, req: DeleteRequest, background_tasks: Backg
             pass
     else:
         files_to_delete = req.items
-        
+
     if not files_to_delete:
         return {"message": "No files found to delete"}
 
@@ -327,7 +398,7 @@ async def delete_index(subject: str, req: DeleteRequest, background_tasks: Backg
             for i, file_path in enumerate(files_to_delete):
                 try:
                     run_ingestion(subject, delete_file=file_path)
-                    
+
                     # Only delete physically if index deletion succeeds
                     try:
                         p = Path(file_path)
@@ -345,10 +416,10 @@ async def delete_index(subject: str, req: DeleteRequest, background_tasks: Backg
                                     break
                     except Exception as e:
                         logger.error(f"Failed to delete physical file {file_path}: {e}")
-                        
+
                 except Exception as e:
                     logger.error(f"Failed to delete {file_path} from index: {e}")
-                
+
                 # Update progress
                 pct = int(((i + 1) / total_files) * 100)
                 background_tasks_state[task_id] = {"status": "running", "progress": pct, "message": f"Deleting {i+1}/{total_files}...", "logs": background_tasks_state[task_id].get("logs", "")}
@@ -359,33 +430,53 @@ async def delete_index(subject: str, req: DeleteRequest, background_tasks: Backg
     return {"message": f"Started deletion of {len(files_to_delete)} files", "task_id": task_id}
 
 @app.get("/api/download/{subject}/{folder:path}")
-async def download_folder(subject: str, folder: str, background_tasks: BackgroundTasks):
-    """Zip and download a folder, or download a specific file."""
+async def download_folder(
+    subject: str,
+    folder: str,
+    background_tasks: BackgroundTasks,
+    user: UserRecord = Depends(get_current_user),
+):
+    """Zip and download a folder, or download a specific file (course + ownership gated)."""
+    if not can_access_subject(user, subject):
+        return Response(status_code=403, content="You are not assigned to this course")
+
     target_path = (_DOCS_DIR / subject / folder).resolve()
-    
+
     # Security check to prevent directory traversal
     if not str(target_path).startswith(str(_DOCS_DIR.resolve())):
         return Response(status_code=403, content="Invalid path")
-        
+
     if not target_path.exists():
         return Response(status_code=404, content="File or folder not found")
 
     if target_path.is_file():
-        # If it's a file, just serve it directly
+        rel_path = target_path.relative_to(_DOCS_DIR).as_posix()
+        if not can_read_generated_file(user, rel_path):
+            return Response(status_code=403, content="You do not have access to this file")
         return FileResponse(
-            target_path, 
+            target_path,
             filename=target_path.name,
             media_type="application/octet-stream"
         )
 
+    # Zipping a folder: block if it contains generated files the user can't read
+    rel_target = target_path.relative_to(_DOCS_DIR).as_posix()
+    generated_root = (_DOCS_DIR / subject / "generated").resolve()
+    if str(generated_root) in str(target_path) and user.role != "admin":
+        for f in target_path.rglob("*"):
+            if f.is_file():
+                rel = f.relative_to(_DOCS_DIR).as_posix()
+                if not can_read_generated_file(user, rel):
+                    return Response(status_code=403, content="Folder contains files you cannot access")
+
     # It's a directory, so zip it
     fd, temp_zip_path = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
-    
+
     # Clean up the .zip string because make_archive appends .zip automatically
-    base_name = temp_zip_path[:-4] 
+    base_name = temp_zip_path[:-4]
     shutil.make_archive(base_name, 'zip', target_path)
-    
+
     def cleanup():
         try:
             os.remove(temp_zip_path)
@@ -393,7 +484,7 @@ async def download_folder(subject: str, folder: str, background_tasks: Backgroun
             pass
 
     background_tasks.add_task(cleanup)
-    
+
     return FileResponse(
         path=temp_zip_path,
         filename=f"{subject}_{folder}.zip",
@@ -405,57 +496,59 @@ async def download_folder(subject: str, folder: str, background_tasks: Backgroun
 
 ACTIVE_SESSIONS: dict[str, dict] = {}
 
-def _save_session_to_disk(sid: str, title: str, orchestrator, history: list):
-    p = SESSIONS_DIR / f"{sid}.json"
-    existing_data = {}
-    if p.exists():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                existing_data = json.load(f)
-        except Exception:
-            pass
+def _save_session_to_db(sid: str, owner_id: str, title: str, orchestrator, history: list):
+    repo.save_chat_session(
+        session_id=sid,
+        owner_id=owner_id,
+        title=title,
+        ui_history=history,
+        gemini_history=orchestrator.to_dict(),
+    )
 
-    # Preserve custom title if it was changed from "New Chat" and current title isn't explicitly passed as something else
-    # Wait, the frontend will just let the backend decide title initially, then use PUT to rename.
-    # We should only overwrite title if existing title is missing or "New Chat".
-    final_title = existing_data.get("title", "New Chat")
-    if final_title == "New Chat" and title != "New Chat":
-        final_title = title
-        
-    data = {
-        "session_id": sid,
-        "title": final_title,
-        "created_at": existing_data.get("created_at", time.time()),
-        "pinned": existing_data.get("pinned", False),
-        "ui_history": history,
-        "gemini_history": orchestrator.to_dict()
-    }
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-def _load_session_from_disk(sid: str) -> dict | None:
-    p = SESSIONS_DIR / f"{sid}.json"
-    if p.exists():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load session {sid}: {e}")
+def _load_session_from_db(sid: str):
+    record = repo.get_chat_session(sid)
+    if record is None:
+        return None
+    try:
+        return {
+            "owner_id": record.owner_id,
+            "title": record.title,
+            "pinned": record.pinned,
+            "ui_history": json.loads(record.ui_history_json or "[]"),
+            "gemini_history": json.loads(record.gemini_history_json or "{}"),
+        }
+    except Exception as e:
+        logger.error(f"Failed to load session {sid}: {e}")
     return None
 
 @app.websocket("/ws")
 async def websocket_chat(ws: WebSocket, session_id: str = None):
-    """Handle a single chat/voice session over WebSocket."""
+    """Handle a single chat/voice session over WebSocket (auth required)."""
+    user = websocket_user(ws)
+    if user is None:
+        await ws.close(code=4401)
+        return
+
     await ws.accept()
-    logger.info("WebSocket connected")
+    logger.info("WebSocket connected (user=%s)", user.username)
 
     # Import here to avoid circular / heavy imports at module level
     from klyra.chat import ChatOrchestrator
 
+    # Ownership check: existing session must belong to this user (admin exempt)
+    if session_id:
+        existing = repo.get_chat_session(session_id)
+        if existing is not None and existing.owner_id != user.id and user.role != "admin":
+            await ws.close(code=4403)
+            return
+
     chat_history_for_voice: list[dict] = []
     voice_session_task = None
     voice_session_ref = {"session": None, "active": False}
-    
+    allowed_subjects = (
+        None if user.role == "admin" else set(repo.user_courses(user))
+    )
+
     def _sync_save():
         if session_id:
             title = "New Chat"
@@ -468,12 +561,11 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
                         title = e[1]
                         break
             title = (title[:30] + '...') if len(title) > 30 else title
-            _save_session_to_disk(session_id, title, orchestrator, chat_history_for_voice)
+            _save_session_to_db(session_id, user.id, title, orchestrator, chat_history_for_voice)
 
     # ── Chat orchestrator callbacks ──
 
     def _sanitize(d): return d
-
     async def on_text(text: str):
         event = {"type": "klyra_text", "text": text}
         chat_history_for_voice.append(event)
@@ -503,31 +595,31 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
         except Exception as e:
             logger.debug(f"Failed to send tool log: {e}")
 
-    # Load from memory or disk
-    loaded_from_disk = False
+    # Load from memory or DB
     if session_id:
         if session_id in ACTIVE_SESSIONS:
             session_data = ACTIVE_SESSIONS[session_id]
             orchestrator = session_data["orchestrator"]
             chat_history_for_voice = session_data["history"]
         else:
-            disk_data = _load_session_from_disk(session_id)
-            if disk_data:
-                chat_history_for_voice = disk_data.get("ui_history", [])
+            db_data = _load_session_from_db(session_id)
+            if db_data:
+                chat_history_for_voice = db_data.get("ui_history", [])
                 orchestrator = ChatOrchestrator(
                     on_text=on_text,
                     on_tool_start=on_tool_start,
                     on_tool_done=on_tool_done,
                     on_file_link=on_file_link,
                     on_tool_log=on_tool_log,
+                    allowed_subjects=allowed_subjects,
+                    user_id=user.id,
                 )
                 await orchestrator.initialize()
-                orchestrator.load_from_dict(disk_data.get("gemini_history", {}))
+                orchestrator.load_from_dict(db_data.get("gemini_history", {}))
                 ACTIVE_SESSIONS[session_id] = {
                     "orchestrator": orchestrator,
                     "history": chat_history_for_voice
                 }
-                loaded_from_disk = True
 
     if session_id and session_id in ACTIVE_SESSIONS:
         # Reattach callbacks
@@ -538,7 +630,7 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
         orchestrator._on_tool_log = on_tool_log
         if orchestrator._executor:
             orchestrator._executor.on_log_callback = on_tool_log
-            
+
         # Rehydrate client UI
         for event in chat_history_for_voice:
             # Handle legacy string tuples (if old sessions exist)
@@ -559,6 +651,8 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
             on_tool_done=on_tool_done,
             on_file_link=on_file_link,
             on_tool_log=on_tool_log,
+            allowed_subjects=allowed_subjects,
+            user_id=user.id,
         )
         await orchestrator.initialize()
         if session_id:
@@ -607,7 +701,7 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
                     user_event = {"type": "user_transcript", "text": user_text, "final": True}
                     chat_history_for_voice.append(user_event)
                     _sync_save()
-                    
+
                     async def process_chat(text):
                         try:
                             response = await orchestrator.send_message(text)
@@ -635,7 +729,7 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
                     # Start voice session
                     if not voice_session_ref["active"]:
                         voice_session_task = asyncio.create_task(
-                            _run_voice_session(ws, voice_session_ref, chat_history_for_voice, orchestrator, session_id)
+                            _run_voice_session(ws, voice_session_ref, chat_history_for_voice, orchestrator, session_id, user, _sync_save)
                         )
 
                 elif msg_type == "voice_stop":
@@ -666,7 +760,7 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
         await _stop_voice(voice_session_task, voice_session_ref)
 
 
-async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orchestrator, session_id: str):
+async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orchestrator, session_id: str, user, sync_save):
     """Run a Gemini Live API voice session, forwarding audio/events to the WebSocket."""
     from google import genai
     from google.genai import types
@@ -675,19 +769,19 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
     from klyra.core import SYSTEM_INSTRUCTION
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    model = os.environ.get("KLYRA_VOICE_MODEL", "gemini-2.0-flash-exp")
+    model = os.environ.get("KLYRA_VOICE_MODEL", "gemini-3.1-flash-live-preview")
     voice_name = os.environ.get("KLYRA_VOICE_NAME", "Zephyr")
     client = genai.Client(api_key=api_key)
-    
+
     ws_lock = asyncio.Lock()
-    
+
     async def safe_send_json(data):
         async with ws_lock:
             try:
                 await ws.send_json(data)
             except Exception:
                 pass
-                
+
     async def safe_send_bytes(data):
         async with ws_lock:
             try:
@@ -703,8 +797,8 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
 
     # Build system instruction with full conversation and tool history
     sys_inst = SYSTEM_INSTRUCTION
+    history_lines: list[str] = []
     if orchestrator and hasattr(orchestrator, "_history") and orchestrator._history:
-        history_lines = []
         # Take the last 20 messages to ensure tool context is captured
         for msg in orchestrator._history[-20:]:
             if not hasattr(msg, "role") or not hasattr(msg, "parts"):
@@ -721,10 +815,10 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
                     if len(resp_str) > 1500:
                         resp_str = resp_str[:1500] + "... (truncated)"
                     history_lines.append(f"{role} (TOOL RESULT for {part.function_response.name}): {resp_str}")
-                    
-        if history_lines:
-            history_text = "\n".join(history_lines)
-            sys_inst += f"\n\n### RECENT CONVERSATION & TOOL HISTORY (for context):\n{history_text}"
+
+    if history_lines:
+        history_text = "\n".join(history_lines)
+        sys_inst += f"\n\n### RECENT CONVERSATION & TOOL HISTORY (for context):\n{history_text}"
 
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
@@ -763,39 +857,70 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
             async for response in session.receive():
                 # Tool calls
                 if response.tool_call and response.tool_call.function_calls:
+                    tool_responses = []
                     for fc in response.tool_call.function_calls:
+                        # Enforce subject RBAC: reject tool calls on unassigned subjects
+                        fc_args = dict(fc.args) if fc.args else {}
+                        if allowed_subjects is not None:
+                            subj = str(fc_args.get("subject", "")).lower()
+                            if subj and subj not in allowed_subjects:
+                                deny = {
+                                    "status": "error",
+                                    "message": f"Access denied: you are not assigned to the course '{subj}'.",
+                                    "tool": fc.name,
+                                }
+                                tool_responses.append(
+                                    types.FunctionResponse(name=fc.name, id=fc.id, response=deny)
+                                )
+                                await safe_send_json({"type": "tool_done", "tool": fc.name, "status": "error", "message": deny["message"][:500]})
+                                continue
+
                         # Append tool call to history so it's available if we switch back to text chat
                         orchestrator._history.append(
                             types.Content(role="model", parts=[types.Part(
-                                function_call=types.FunctionCall(name=fc.name, args=fc.args)
+                                function_call=types.FunctionCall(name=fc.name, args=fc_args)
                             )])
                         )
 
-                        start_event = {"type": "tool_start", "tool": fc.name, "args": _sanitize(dict(fc.args))}
+                        start_event = {"type": "tool_start", "tool": fc.name, "args": _sanitize(fc_args)}
                         chat_history.append(start_event)
                         await safe_send_json(start_event)
-                        
-                        result = await executor.execute(fc.name, dict(fc.args))
+
+                        result = await executor.execute(fc.name, fc_args)
                         status = result.get("status", "error")
                         msg = result.get("message", "")
-                        
+
+                        # Register ownership of generated files created by this user
+                        if status == "success" and user is not None:
+                            try:
+                                subj = str(fc_args.get("subject", "")).lower()
+                                if subj:
+                                    gen_root = (Path("docs") / subj / "generated").resolve()
+                                    now = time.time()
+                                    for f in gen_root.rglob("*"):
+                                        if f.is_file() and (now - f.stat().st_mtime) < 120:
+                                            rel = f.relative_to(Path("docs")).as_posix()
+                                            repo.set_file_owner(rel, user.id, subj)
+                            except Exception as e:
+                                logger.debug("file-ownership tagging failed: %s", e)
+
                         done_event = {"type": "tool_done", "tool": fc.name, "status": status, "message": msg[:500]}
                         chat_history.append(done_event)
                         await safe_send_json(done_event)
-                        
+
                         # Append tool response to history so it's available if we switch back to text chat
                         orchestrator._history.append(
                             types.Content(role="user", parts=[types.Part(
                                 function_response=types.FunctionResponse(name=fc.name, response=result)
                             )])
                         )
+                        tool_responses.append(
+                            types.FunctionResponse(name=fc.name, id=fc.id, response=result)
+                        )
 
                     # Send tool responses back to Gemini
-                    responses = [
-                        types.FunctionResponse(name=fc.name, id=fc.id, response=result)
-                        for fc in response.tool_call.function_calls
-                    ]
-                    await session.send_tool_response(function_responses=responses)
+                    if tool_responses:
+                        await session.send_tool_response(function_responses=tool_responses)
 
                 # Audio + transcriptions
                 if response.server_content is not None:
@@ -824,17 +949,23 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
                             chat_history.append(model_event)
                             orchestrator._history.append(types.Content(role="model", parts=[types.Part(text=current_model_text)]))
                             current_model_text = ""
-                        
+
                         turn_event = {"type": "turn_complete"}
                         chat_history.append(turn_event)
                         await safe_send_json(turn_event)
-                        
+
                         if session_id:
                             title = "New Chat"
                             if len(chat_history) > 0:
-                                first_msg = chat_history[0][1]
-                                title = (first_msg[:30] + '...') if len(first_msg) > 30 else first_msg
-                            _save_session_to_disk(session_id, title, orchestrator, chat_history)
+                                for e in chat_history:
+                                    if isinstance(e, dict) and e.get("type") == "user_transcript":
+                                        title = e.get("text", "")
+                                        break
+                                    elif isinstance(e, list) or isinstance(e, tuple):
+                                        title = e[1]
+                                        break
+                            title = (title[:30] + '...') if len(title) > 30 else title
+                            sync_save()
 
     except asyncio.CancelledError:
         pass

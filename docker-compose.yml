@@ -20,7 +20,7 @@ services:
   web:
     <<: *klyra-common
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${WEB_PORT:-8765}:8765"
     depends_on:
       - redis
       - db

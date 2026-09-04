@@ -71,9 +71,16 @@ class ToolExecutor:
         "generate_diagram": "_run_generate_diagram",
     }
 
-    def __init__(self, on_log_callback: Callable[[str, str], Coroutine[Any, Any, None]] | None = None):
+    def __init__(
+        self,
+        on_log_callback: Callable[[str, str], Coroutine[Any, Any, None]] | None = None,
+        allowed_subjects: set[str] | None = None,
+    ):
         self._confirmation_tokens: dict[str, str] = {}
         self.on_log_callback = on_log_callback
+        # RBAC: None → unrestricted (admin/CLI); otherwise tool calls on
+        # subjects outside this set are rejected (used by the web app).
+        self.allowed_subjects = allowed_subjects
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Dispatch *name* with *args* to the appropriate service function.
@@ -91,6 +98,22 @@ class ToolExecutor:
         # Normalize subject to lowercase to prevent case-sensitivity issues
         if "subject" in args and isinstance(args["subject"], str):
             args["subject"] = args["subject"].lower()
+
+        # RBAC: reject tool calls targeting subjects outside the user's courses
+        if (
+            self.allowed_subjects is not None
+            and isinstance(args.get("subject"), str)
+            and args["subject"]
+            and args["subject"] not in self.allowed_subjects
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    f"Access denied: you are not assigned to the course "
+                    f"'{args['subject']}'. Ask your admin to assign it."
+                ),
+                "tool": name,
+            }
 
         handler = getattr(self, handler_name)
         logger.info("Executing tool %s with args %s", name, args)

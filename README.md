@@ -194,6 +194,7 @@ Agents use these tools to interact with the outside world:
 | **LLM** | Gemini (via LiteLLM) | Default: `gemini-3.1-flash-lite` (configurable via `KLYRA_LLM_MODEL`) |
 | **Embeddings** | Gemini Embedding | `gemini-embedding-2` (or OpenAI `text-embedding-3-small`) |
 | **Job Store** | SQLite / PostgreSQL | Job records: status, result, error, timestamps |
+| **Users & RBAC** | SQLite / PostgreSQL | `users` (role, assigned courses), `chat_sessions` (owner, history), `file_ownership` (generated-file owners) — shared `DATABASE_URL`, local SQLite at `KLYRA_DB` |
 | **Chat Sessions** | `.db` (JSON) / PostgreSQL | Local chat history is stored in lightweight `.db/sessions/` JSON files. In production, this shifts to PostgreSQL to handle concurrent users (see SaaS section). |
 | **Queue** | Redis | Celery broker + result backend (API mode only) |
 | **Filesystem** | `docs/<subject>/` | Source materials (`week_1/`–`week_12/`, `pyq/`, `additional/`) and generated outputs (`generated/`) |
@@ -296,9 +297,12 @@ Docker Compose is the easiest way to spin up the entire cluster, complete with t
    
    *(Note: The first time you run this, it will take several minutes to download heavy AI dependencies like `crewai` and `langchain`. Future builds are almost instant thanks to layer caching!)*
 
-3. **Check the API**
-   Once running, you can view the interactive API documentation at:
-   - http://localhost:8000/docs
+3. **Access the Web UI & API**
+   Once running, you can access the full web interface at:
+   - http://localhost:8765
+
+   You can also view the interactive API documentation at:
+   - http://localhost:8765/docs
    
 4. **View Logs**
    To see what the background AI workers are doing:

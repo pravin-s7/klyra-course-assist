@@ -47,5 +47,5 @@ USER klyra
 ENV KLYRA_CHROMA_DIR=/app/.chroma
 ENV KLYRA_JOBS_DB=/app/state/jobs.sqlite3
 
-EXPOSE 8000
-ENTRYPOINT ["uvicorn", "klyra.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8765
+ENTRYPOINT ["uvicorn", "klyra.web.server:app", "--host", "0.0.0.0", "--port", "8765", "--proxy-headers"]
