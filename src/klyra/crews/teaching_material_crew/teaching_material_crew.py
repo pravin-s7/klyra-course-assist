@@ -11,13 +11,19 @@ from crewai import Agent, Crew, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 
+from klyra.crews.base_task import KlyraTask
 from klyra.llm_config import default_llm, default_embedder
+from klyra.models.task_outputs import TeachingAnswersOutput, TeachingMaterialOutput
 from klyra.tools.image_tools import SearchImagesTool
 from klyra.tools.latex_diagram_tool import GenerateDiagramTool, GenerateGraphTool
 from klyra.tools.syllabus_tools import (
     FetchParsedChunksTool,
     ReportSyllabusGapsTool,
     SyllabusSearchTool,
+)
+from klyra.utils.task_guardrails import (
+    teaching_answers_guardrail,
+    teaching_material_guardrail,
 )
 
 
@@ -46,9 +52,37 @@ class TeachingMaterialCrew:
             verbose=True,
         )
 
+    @agent
+    def teaching_answers_preparer(self) -> Agent:
+        return Agent(
+            config=self.agents_config["teaching_answers_preparer"],  # type: ignore[index]
+            tools=[
+                FetchParsedChunksTool(),
+                SyllabusSearchTool(),
+                SearchImagesTool(),
+            ],
+            llm=default_llm(),
+            verbose=True,
+        )
+
     @task
     def prepare_teaching_material_task(self) -> Task:
-        return Task(config=self.tasks_config["prepare_teaching_material_task"])  # type: ignore[index]
+        return KlyraTask(
+            config=self.tasks_config["prepare_teaching_material_task"],  # type: ignore[index]
+            output_pydantic=TeachingMaterialOutput,
+            guardrail=teaching_material_guardrail,
+            output_file="docs/{subject}/generated/teaching/{session_name}-teaching-material.md",
+        )
+
+    @task
+    def prepare_teaching_answers_task(self) -> Task:
+        return KlyraTask(
+            config=self.tasks_config["prepare_teaching_answers_task"],  # type: ignore[index]
+            context=[self.prepare_teaching_material_task()],
+            output_pydantic=TeachingAnswersOutput,
+            guardrail=teaching_answers_guardrail,
+            output_file="docs/{subject}/generated/teaching/{session_name}-teaching-answers.md",
+        )
 
     @crew
     def crew(self) -> Crew:
@@ -60,3 +94,4 @@ class TeachingMaterialCrew:
             verbose=True,
             embedder=default_embedder(),
         )
+

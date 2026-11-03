@@ -26,6 +26,7 @@ TRANSCRIPTS_DIR_NAME = "transcripts"
 GENERATED_DIR_NAME = "generated"
 ASSETS_DIR_NAME = ".assets"
 MANIFEST_NAME = ".ingest_manifest.json"
+SKILL_FILE_NAME = "skill.md"
 
 # Office formats are converted to PDF (via LibreOffice) before multimodal
 # parsing; plain-text formats are read directly; anything else supported is
@@ -110,6 +111,11 @@ def assets_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
     return subject_dir(subject, root) / ASSETS_DIR_NAME
 
 
+def subject_skill_path(subject: str, root: Path = DOCS_ROOT) -> Path:
+    """Per-subject skill configuration file (`docs/<subject>/skill.md`)."""
+    return subject_dir(subject, root) / SKILL_FILE_NAME
+
+
 def markdown_image_path(subject: str, image_path: Path, root: Path = DOCS_ROOT) -> str:
     """Relative path from a generated QP file's directory to an asset image,
     ready to paste directly into markdown image syntax."""
@@ -121,8 +127,39 @@ def is_supported_file(path: Path) -> bool:
     return (
         path.is_file()
         and not path.name.startswith(".")
+        and path.name != SKILL_FILE_NAME
         and path.suffix.lower() in SUPPORTED_SUFFIXES
     )
+
+
+import contextlib
+from typing import Iterator
+
+
+@contextlib.contextmanager
+def crewai_storage_context(storage_dir: str) -> Iterator[str]:
+    """Thread/context-safe helper to scope `CREWAI_STORAGE_DIR` and CrewAI's
+    `db_storage_path` without failing if `crewai_core` is absent."""
+    abs_dir = os.path.abspath(storage_dir)
+    prev = os.environ.get("CREWAI_STORAGE_DIR")
+    os.environ["CREWAI_STORAGE_DIR"] = abs_dir
+    try:
+        from unittest.mock import patch
+
+        stack = contextlib.ExitStack()
+        for target in ("crewai_core.paths.db_storage_path", "crewai.utilities.paths.db_storage_path"):
+            try:
+                stack.enter_context(patch(target, return_value=abs_dir))
+                break
+            except Exception:
+                pass
+        with stack:
+            yield abs_dir
+    finally:
+        if prev is None:
+            os.environ.pop("CREWAI_STORAGE_DIR", None)
+        else:
+            os.environ["CREWAI_STORAGE_DIR"] = prev
 
 
 @dataclass(frozen=True)
@@ -155,6 +192,8 @@ def discover_subject_files(
 ) -> list[SourceFile]:
     """Find all ingestible documents for a subject, optionally filtered by week and categories."""
     base = subject_dir(subject)
+    if not file_path and not base.exists():
+        raise FileNotFoundError(f"Subject directory does not exist: {base}")
     sources = []
 
     if file_path:

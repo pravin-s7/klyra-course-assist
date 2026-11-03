@@ -12,12 +12,21 @@ from crewai import Agent, Crew, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 
+from klyra.crews.base_task import KlyraTask
 from klyra.llm_config import default_llm, default_embedder
+from klyra.models.task_outputs import (
+    DocumentParseReportOutput,
+    SyllabusIndexReportOutput,
+)
 from klyra.tools.document_parser_tool import DocumentParserTool
 from klyra.tools.syllabus_tools import (
     FetchParsedChunksTool,
     ReportSyllabusGapsTool,
     WriteSyllabusEntriesTool,
+)
+from klyra.utils.task_guardrails import (
+    ingestion_index_guardrail,
+    ingestion_parse_guardrail,
 )
 
 
@@ -51,13 +60,21 @@ class IngestionCrew:
 
     @task
     def parse_documents_task(self) -> Task:
-        return Task(config=self.tasks_config["parse_documents_task"])  # type: ignore[index]
+        return KlyraTask(
+            config=self.tasks_config["parse_documents_task"],  # type: ignore[index]
+            output_pydantic=DocumentParseReportOutput,
+            guardrail=ingestion_parse_guardrail,
+        )
 
     @task
     def index_syllabus_task(self) -> Task:
         # No explicit context needed: Process.sequential already relays the
         # immediately-preceding task's output, and there are only 2 tasks here.
-        return Task(config=self.tasks_config["index_syllabus_task"])  # type: ignore[index]
+        return KlyraTask(
+            config=self.tasks_config["index_syllabus_task"],  # type: ignore[index]
+            output_pydantic=SyllabusIndexReportOutput,
+            guardrail=ingestion_index_guardrail,
+        )
 
     @crew
     def crew(self) -> Crew:

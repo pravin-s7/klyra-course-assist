@@ -7,20 +7,57 @@ revise_teaching_material_task:
     example, simplify an explanation, restructure the outline) and leave
     everything not covered by the instructions unchanged. Use
     fetch_parsed_chunks and search_syllabus to ground any new/changed
-    content in real indexed material for this subject/scope - never
+    content in real indexed material for this subject/scope — never
     invent material beyond what's indexed; if the instructions ask for
     something not covered by the syllabus index, say so instead of
-    filling it in. If a change needs a new diagram, call search_images
-    first and only call generate_diagram for one specific to an example
-    you're constructing with an already-known-correct structure, paying 
-    close attention to domain semantics (use DIRECTED graphs for CT, 
-    proper ER symbols for DBMS, etc) - never fabricate one.
+    filling it in.
+
+    **DIAGRAMS:**
+    If a change needs a new diagram, call search_images first and only call
+    generate_diagram for one specific to an example you're constructing and
+    whose exact structure you already know, paying close attention to domain
+    semantics (use DIRECTED graphs for data structures, proper ER symbols
+    for DBMS, precise logic gates for circuits, etc) — never fabricate one.
+    If generate_diagram is unavailable or fails to compile, describe the
+    diagram in text rather than fabricating a reference.
+
+    **TONE:**
+    Ensure all revised and untouched content flows together in a highly
+    conversational, engaging, and human tone. Do not use dry, encyclopedic
+    phrasing.
 
     --- EXISTING TEACHING MATERIAL ---
     {existing_material_content}
+
+    --- SUBJECT SKILL & TEACHING FORMAT RULES (`docs/{subject}/skill.md`) ---
+    {subject_skill_rules}
+    {subject_diagram_rules}
+    {subject_teaching_format}
   expected_output: >
     The fully revised teaching material in the same markdown format as
     the original, followed by a short changelog listing exactly what
     changed and why. YOU MUST OUTPUT THE ENTIRE REVISED DOCUMENT FROM START TO FINISH. Do not truncate the content or output only the changelog.
   agent: teaching_material_reviser
   output_file: "docs/{subject}/generated/teaching/{session_name}-teaching-material-revised.md"
+
+revise_teaching_answers_task:
+  description: >
+    Update the companion Instructor Guide & Answer Key for the revised teaching
+    material above, subject "{subject}".
+
+    --- PREVIOUS INSTRUCTOR GUIDE & ANSWER KEY ---
+    {existing_answers_content}
+
+    Ensure that:
+    1. Every worked example in the revised teaching material has a complete,
+       step-by-step mathematical or algorithmic derivation.
+    2. Every check-in and discussion question in the revised material has an
+       authoritative model answer, key discussion points, and follow-up prompts.
+    3. Any question or example that was modified, added, or removed in the revision
+       is reflected accurately in this updated answer key.
+  expected_output: >
+    The fully revised Instructor Guide & Answer Key in markdown, containing step-by-step
+    derivations for all worked examples and model answers/rubrics for all check-in questions.
+  agent: teaching_answers_reviser
+  output_file: "docs/{subject}/generated/teaching/{session_name}-teaching-answers-revised.md"
+

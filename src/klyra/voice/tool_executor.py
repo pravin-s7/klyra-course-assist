@@ -69,6 +69,9 @@ class ToolExecutor:
         "read_document": "_run_read_document",
         "list_documents": "_run_list_documents",
         "generate_diagram": "_run_generate_diagram",
+        "get_subject_skill": "_run_get_subject_skill",
+        "update_subject_skill": "_run_update_subject_skill",
+        "verify_coding_package": "_run_verify_coding_package",
     }
 
     def __init__(
@@ -503,3 +506,54 @@ class ToolExecutor:
             return {"status": "success", "markdown": result}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    @staticmethod
+    def _run_get_subject_skill(args: dict) -> dict:
+        from klyra.services.skill_service import (
+            load_subject_skill,
+            render_subject_skill_markdown,
+        )
+        from klyra.utils import fs
+
+        subject = args["subject"]
+        cfg = load_subject_skill(subject)
+        path = fs.subject_skill_path(subject)
+        md = path.read_text(encoding="utf-8") if path.exists() else render_subject_skill_markdown(cfg)
+        return {
+            "message": f"Skill configuration for '{subject}':\n\n{md}",
+            "config": cfg.model_dump(mode="json"),
+        }
+
+    @staticmethod
+    def _run_update_subject_skill(args: dict) -> dict:
+        from klyra.services.skill_service import (
+            parse_subject_skill,
+            render_subject_skill_markdown,
+        )
+        from klyra.utils import fs
+
+        subject = fs.validate_subject(args["subject"])
+        cfg = parse_subject_skill(args["markdown"], fallback_subject=subject)
+        path = fs.subject_skill_path(subject)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rendered = render_subject_skill_markdown(cfg)
+        path.write_text(rendered, encoding="utf-8")
+        return {
+            "message": f"Updated skill.md for '{subject}' at {path}.",
+            "config": cfg.model_dump(mode="json"),
+        }
+
+    @staticmethod
+    def _run_verify_coding_package(args: dict) -> dict:
+        from klyra.services.coding_problem_service import verify_on_disk_coding_package
+        from klyra.services.skill_service import load_subject_skill
+
+        subject = args["subject"]
+        name = args["name"]
+        skill = load_subject_skill(subject)
+        language = args.get("language") or skill.default_coding_language or "python"
+        ok, report = verify_on_disk_coding_package(subject, name, language)
+        return {
+            "all_passed": ok,
+            "message": report,
+        }

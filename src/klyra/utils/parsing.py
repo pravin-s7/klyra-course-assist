@@ -5,12 +5,15 @@ shorthand means.
 from __future__ import annotations
 
 
-def parse_week_numbers(scope: str) -> list[int] | None:
+def parse_week_numbers(scope: str | None) -> list[int] | None:
     """Week numbers implied by a scope string. None means all weeks 1-12.
 
     Accepts: "all", "week_3", "3", "week_1-week_4", "1-4", "1,3,5",
     "1-3,5,7-9" (any mix of single weeks, ranges, and commas).
     """
+    if scope is None:
+        return None
+        
     scope = scope.strip()
     if scope.lower() == "all":
         return None

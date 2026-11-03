@@ -30,7 +30,9 @@ def run_ingestion(
     os.environ["CREWAI_STORAGE_DIR"] = f".db/{subject}"
 
     from klyra.crews.ingestion_crew.ingestion_crew import IngestionCrew
+    from klyra.services.skill_service import ensure_subject_skill
 
+    ensure_subject_skill(subject)
     categories_str = ",".join(categories) if categories else ""
 
     crew = IngestionCrew().crew()

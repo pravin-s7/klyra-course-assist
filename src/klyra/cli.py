@@ -54,7 +54,7 @@ logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 # Kept as a plain string (not imported from code_execution_tool.LANGUAGE_RUNNERS) so
 # building --help doesn't pull in crewai/pydantic just to print this list.
-_SUPPORTED_LANGUAGES_HELP = "python, java, c, cpp, bash"
+_SUPPORTED_LANGUAGES_HELP = "python, java, c, cpp, bash, sql, postgresql, python-db"
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -180,6 +180,49 @@ def _cmd_revise_code(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_skill(args: argparse.Namespace) -> int:
+    from klyra.services.coding_problem_service import verify_on_disk_coding_package
+    from klyra.services.skill_service import (
+        ensure_subject_skill,
+        load_subject_skill,
+        parse_subject_skill,
+        render_subject_skill_markdown,
+    )
+    from klyra.utils import fs
+
+    subject = args.subject
+    if args.init:
+        cfg = ensure_subject_skill(subject, overwrite=args.force)
+        path = fs.subject_skill_path(subject)
+        print(f"Initialized skill.md for '{subject}' at {path} (qp_style={cfg.output_formats.qp_style})")
+        return 0
+
+    if args.verify_code:
+        skill = load_subject_skill(subject)
+        lang = args.language or skill.default_coding_language or "python"
+        ok, report = verify_on_disk_coding_package(subject, args.verify_code, lang)
+        print(report)
+        return 0 if ok else 1
+
+    path = fs.subject_skill_path(subject)
+    if args.validate:
+        cfg = parse_subject_skill(path) if path.exists() else load_subject_skill(subject)
+        print(
+            f"VALID skill configuration for '{cfg.subject_id}' ({cfg.display_name}): "
+            f"qp_style={cfg.output_formats.qp_style}, "
+            f"allowed_types={','.join(cfg.allowed_question_types)}, "
+            f"coding_languages={','.join(cfg.coding_languages)}"
+        )
+        return 0
+
+    cfg = load_subject_skill(subject)
+    if path.exists():
+        print(path.read_text(encoding="utf-8"))
+    else:
+        print(render_subject_skill_markdown(cfg))
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -298,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_generate.add_argument("--qp-name", required=True)
     p_generate.add_argument(
         "--scope",
-        required=True,
+        default=None,
         help='Which weeks: "all", "week_3", "week_1-week_4", "1-4", or "1,3,5" (mix allowed: "1-3,5")',
     )
     p_generate.add_argument(
@@ -327,7 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--types", default=None, help="Comma-separated types if not using --type-counts, e.g. MCQ,MSQ,NAT"
     )
     p_generate.add_argument(
-        "--num-questions", type=int, required=True, dest="num_questions", help="Total, if not using --type-counts"
+        "--num-questions", type=int, default=None, dest="num_questions", help="Total, if not using --type-counts"
     )
     p_generate.add_argument(
         "--notes",
@@ -487,11 +530,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--port", type=int, default=8765)
     p_web.set_defaults(func=_cmd_web)
 
+    p_skill = sub.add_parser(
+        "skill",
+        help="Inspect, initialize, or validate a subject's skill.md configuration or verify coding packages",
+    )
+    p_skill.add_argument("--subject", required=True, help="Subject identifier, e.g. dbms, ct, python")
+    p_skill.add_argument("--show", action="store_true", help="Print the subject's skill.md configuration")
+    p_skill.add_argument("--validate", action="store_true", help="Validate docs/<subject>/skill.md")
+    p_skill.add_argument("--init", action="store_true", help="Create docs/<subject>/skill.md if missing")
+    p_skill.add_argument("--force", action="store_true", help="Overwrite existing skill.md when used with --init")
+    p_skill.add_argument(
+        "--verify-code",
+        default=None,
+        dest="verify_code",
+        help="Verify all public/private test cases of an on-disk coding package by name",
+    )
+    p_skill.add_argument(
+        "--language",
+        default=None,
+        help=f"Optional language override for --verify-code ({_SUPPORTED_LANGUAGES_HELP})",
+    )
+    p_skill.set_defaults(func=_cmd_skill)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv(Path.cwd() / ".env")
+    load_dotenv(Path.cwd() / ".env", override=True)
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

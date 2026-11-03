@@ -26,6 +26,9 @@ def get_all_declarations() -> list[dict]:
         _read_document(),
         _list_documents(),
         _generate_diagram(),
+        _get_subject_skill(),
+        _update_subject_skill(),
+        _verify_coding_package(),
     ]
     # Require confirmation for ALL tools
     for d in decls:
@@ -409,7 +412,7 @@ def _generate_coding_problems() -> dict:
                 "language": {
                     "type": "STRING",
                     "description": (
-                        "Programming language: python, java, c, cpp, or bash."
+                        "Programming language: python, java, c, cpp, bash, sql, postgresql, or python-db."
                     ),
                 },
                 "scope": {
@@ -505,7 +508,7 @@ def _revise_coding_problems() -> dict:
                 "language": {
                     "type": "STRING",
                     "description": (
-                        "Programming language: python, java, c, cpp, or bash."
+                        "Programming language: python, java, c, cpp, bash, sql, postgresql, or python-db."
                     ),
                 },
                 "notes": {
@@ -616,5 +619,80 @@ def _generate_diagram() -> dict:
                 }
             },
             "required": ["subject", "latex_body", "caption", "ground_truth"],
+        },
+    }
+
+
+def _get_subject_skill() -> dict:
+    return {
+        "name": "get_subject_skill",
+        "description": (
+            "Read a subject's skill.md configuration (domain rules, allowed question types, "
+            "coding languages, and custom output formats for question papers, answer keys, "
+            "coding problems, and teaching material)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "subject": {
+                    "type": "STRING",
+                    "description": "Subject identifier (e.g. 'dbms', 'ct', 'python').",
+                },
+            },
+            "required": ["subject"],
+        },
+    }
+
+
+def _update_subject_skill() -> dict:
+    return {
+        "name": "update_subject_skill",
+        "description": (
+            "Validate and update a subject's docs/<subject>/skill.md configuration file "
+            "with custom YAML frontmatter and markdown formatting instructions."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "subject": {
+                    "type": "STRING",
+                    "description": "Subject identifier (e.g. 'dbms').",
+                },
+                "markdown": {
+                    "type": "STRING",
+                    "description": "Complete skill.md content with YAML frontmatter and markdown sections.",
+                },
+            },
+            "required": ["subject", "markdown"],
+        },
+    }
+
+
+def _verify_coding_package() -> dict:
+    return {
+        "name": "verify_coding_package",
+        "description": (
+            "Execute all public and private test cases of an on-disk coding problem package "
+            "against its reference solution in the isolated Docker sandbox and return the pass/fail report."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "subject": {
+                    "type": "STRING",
+                    "description": "Subject identifier (e.g. 'python', 'c_programming', 'dbms').",
+                },
+                "name": {
+                    "type": "STRING",
+                    "description": "Name of the coding problem set (e.g. 'lab-3').",
+                },
+                "language": {
+                    "type": "STRING",
+                    "description": (
+                        "Optional language override: python, java, c, cpp, bash, sql, postgresql, or python-db."
+                    ),
+                },
+            },
+            "required": ["subject", "name"],
         },
     }

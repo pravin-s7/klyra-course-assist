@@ -53,7 +53,7 @@ class ChatOrchestrator:
         # limited to these subjects (courses). user_id tags generated files.
         self._allowed_subjects = allowed_subjects
         self._user_id = user_id
-        self._model = os.environ.get("KLYRA_CHAT_MODEL", _DEFAULT_CHAT_MODEL)
+        self._model = os.environ.get("KLYRA_CHAT_MODEL") or os.environ.get("KLYRA_MODEL", _DEFAULT_CHAT_MODEL)
         self._client = None
         self._chat = None
         self._executor = None

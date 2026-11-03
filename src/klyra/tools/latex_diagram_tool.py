@@ -142,12 +142,21 @@ class GenerateDiagramTool(BaseTool):
     def _run(
         self, subject: str, latex_body: str, caption: str, ground_truth: str, week: int | None = None
     ) -> str:
+        from klyra.services.skill_service import load_subject_skill
+
+        skill = load_subject_skill(subject)
+        diagram_rules = (skill.diagram_conventions_markdown or "").strip()
+
         try:
             png_bytes = render_latex_to_png(latex_body)
         except LatexNotAvailableError as exc:
             return f"{exc} Write this question as text-only instead."
         except Exception as exc:  # noqa: BLE001 - compile errors surfaced to the agent to fix/retry
-            return f"LaTeX failed to compile - fix it and retry, or write this question as text-only:\n{exc}"
+            rules_hint = f"\nSubject diagram conventions ({skill.diagram_style}):\n{diagram_rules}" if diagram_rules else ""
+            return (
+                f"LaTeX failed to compile - fix it and retry, or write this question as text-only:\n"
+                f"{exc}{rules_hint}"
+            )
 
         out_dir = fs.assets_dir(subject) / "generated"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +175,7 @@ class GenerateDiagramTool(BaseTool):
                         "week": week or 0,
                         "source_file": "generated",
                         "page": 0,
+                        "diagram_style": skill.diagram_style,
                         "image_path": fs.markdown_image_path(subject, image_path),
                     },
                 }

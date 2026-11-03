@@ -10,8 +10,13 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 
 from klyra.api.dependencies import DEFAULT_RATE_LIMIT, limiter, require_api_key
 from klyra.celery_app import celery_app
-from klyra.models.responses import JobAccepted
-from klyra.services import job_store
+from klyra.models.requests import SkillUpdateRequest
+from klyra.models.responses import (
+    JobAccepted,
+    StructuredOutputsResponse,
+    SubjectSkillResponse,
+)
+from klyra.services import job_store, results_service, skill_service
 from klyra.tools import vector_store
 from klyra.utils import fs
 from fastapi.responses import FileResponse
@@ -144,3 +149,80 @@ def download_file(
         raise HTTPException(status_code=404, detail="File not found")
         
     return FileResponse(target_path)
+
+
+@router.get(
+    "/subjects/{subject}/skill",
+    response_model=SubjectSkillResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def get_subject_skill(subject: str) -> SubjectSkillResponse:
+    try:
+        subject = fs.validate_subject(subject)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    cfg = skill_service.load_subject_skill(subject)
+    path = fs.subject_skill_path(subject)
+    markdown = (
+        path.read_text(encoding="utf-8")
+        if path.exists()
+        else skill_service.render_subject_skill_markdown(cfg)
+    )
+    return SubjectSkillResponse(
+        subject=subject,
+        config=cfg.model_dump(mode="json"),
+        markdown=markdown,
+    )
+
+
+@router.put(
+    "/subjects/{subject}/skill",
+    response_model=SubjectSkillResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def update_subject_skill(
+    subject: str,
+    req: SkillUpdateRequest,
+) -> SubjectSkillResponse:
+    try:
+        subject = fs.validate_subject(subject)
+        cfg = skill_service.parse_subject_skill(req.markdown, fallback_subject=subject)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    path = fs.subject_skill_path(subject)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = skill_service.render_subject_skill_markdown(cfg)
+    path.write_text(rendered, encoding="utf-8")
+    return SubjectSkillResponse(
+        subject=subject,
+        config=cfg.model_dump(mode="json"),
+        markdown=rendered,
+    )
+
+
+@router.get(
+    "/subjects/{subject}/structured",
+    response_model=StructuredOutputsResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def get_subject_structured_outputs(
+    subject: str,
+    category: str | None = None,
+    name: str | None = None,
+) -> StructuredOutputsResponse:
+    try:
+        subject = fs.validate_subject(subject)
+        outputs = results_service.get_structured_outputs(
+            subject, category=category, name=name
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return StructuredOutputsResponse(
+        subject=subject,
+        category=category,
+        name=name,
+        outputs=outputs,
+    )

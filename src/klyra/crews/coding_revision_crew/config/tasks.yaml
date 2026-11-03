@@ -28,10 +28,11 @@ revise_coding_problems_task:
     write_subject_file for any extra path). Do not only describe the layout
     in markdown - the files must exist on disk.
 
-    CRITICAL MULTIPLE-PROBLEM RULES:
-    1. If the problem you are revising is part of a multiple-problem package, you MUST pass the correct `problem_subdir` to write_coding_package (e.g., problem-1, problem-2) so the files aren't dumped in the root folder.
-    2. If you fixed a test case that was embedded as an example in the README, you MUST pass the corrected README via the `readme` parameter to write_coding_package so it stays consistent. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers.
-    3. You MUST pass your verified reference solution code to write_coding_package using the `reference_solution` parameter. Do not call write_subject_file to write the solution. Do not put the reference solution in README.md.
+    CRITICAL PACKAGING & MULTIPLE-PROBLEM RULES:
+    1. When revising a single-problem package (only 1 problem in the set), do NOT pass `problem_subdir` (leave it `None`) so files are written directly to `docs/{subject}/generated/coding/{name}/`. ONLY pass `problem_subdir` (e.g., `problem-1`, `problem-2`) when the package contains multiple problems (`num_questions > 1`).
+    2. If you fixed a test case that was embedded as an example in the README, you MUST pass the corrected README via the `readme` parameter to write_coding_package so it stays consistent. You MUST strictly preserve its YAML frontmatter and standard LeetCode headers. Never include private test cases or the reference solution in `README.md` or in `sample_tests`.
+    3. You MUST pass your verified reference solution code to write_coding_package using the `reference_solution` parameter (do not call write_subject_file to write the solution and do not pass a custom `evaluation_script` or `evaluation_script_filename`).
+    4. Populate `public_tests` and `private_tests` in your structured output with the exact `stdin_input` and `expected_stdout` (including full SQL `CREATE TABLE`/`INSERT INTO`/`\copy` setup statements for `python-db`/`postgresql`/`sql` problems) so the downstream validator executes the exact same inputs.
     Subject="{subject}", name="{name}".
 
     --- ORIGINAL PROBLEMS ---
@@ -45,6 +46,10 @@ revise_coding_problems_task:
 
     --- FINAL SUMMARY (CROSS-CHECKED ISSUES) ---
     {final_summary_content}
+
+    --- SUBJECT SKILL & CODING OUTPUT FORMAT RULES (`docs/{subject}/skill.md`) ---
+    {subject_skill_rules}
+    {subject_coding_format}
   expected_output: >
     The fully revised set of coding problems in the same markdown format as
     the original (numbered problems, concept/week/language/marks/
@@ -56,3 +61,59 @@ revise_coding_problems_task:
     it. Also state the on-disk package path that write_coding_package wrote.
   agent: coding_problem_reviser
   output_file: "docs/{subject}/generated/coding/{name}-problems-revised.md"
+
+validate_revised_test_cases_task:
+  description: >
+    Independently validate every test case for the revised coding problems above,
+    subject "{subject}", language {language}.
+
+    1. Execute the revised reference solution against every public and private
+       test case using `run_code` with `language="{language}"`. For `python-db`,
+       `postgresql`, or `sql` problems, you MUST keep the full SQL seed script
+       (`CREATE TABLE`, `INSERT INTO`, `\copy`, etc.) in each test case's `stdin_input`
+       (never replace the SQL setup with a bare string) and set `language="{language}"`
+       in your output. Confirm that every test case passes cleanly.
+    2. If any test case or reference solution was revised, ensure the on-disk package
+       files under docs/{subject}/generated/coding/{name} (public/test_case_N,
+       private/test_case_N, README.md, and reference_solution) are updated with
+       write_coding_package so the filesystem is 100% in sync. Do NOT pass a custom
+       `evaluation_script` or `evaluation_script_filename`, and omit `problem_subdir`
+       when there is only 1 problem in the package.
+    3. Document the execution result for every test case.
+  expected_output: >
+    A comprehensive test-case execution report detailing the pass/fail status of
+    each public and private test case run with run_code, along with confirmation
+    of on-disk package updates.
+  agent: test_case_validator
+  output_file: "docs/{subject}/generated/coding/{name}-testcases-revised.md"
+
+coding_discrepancy_review_revised_task:
+  description: >
+    Review the revised coding problems above for subject "{subject}" (language {language}).
+    Confirm that every issue from the previous discrepancy report:
+    {discrepancy_content}
+    and final summary has been completely resolved.
+
+    Verify that:
+    - Problem statements are unambiguous with clear I/O specifications and constraints.
+    - Examples and explanations match the actual test cases.
+    - No verbatim copies of PYQ/LeetCode problems exist.
+    Do NOT execute or solve any code.
+  expected_output: >
+    A per-problem discrepancy verdict confirming whether previous issues were resolved
+    and confirming the revised problems are clear and unambiguous.
+  agent: coding_discrepancy_reviewer
+  output_file: "docs/{subject}/generated/coding/{name}-coding-discrepancy-report-revised.md"
+
+finalize_revised_coding_review_task:
+  description: >
+    Compare the revised coding discrepancy report against the revised test-case validation report
+    above for subject "{subject}".
+    Confirm that all previous issues are resolved and that all test cases pass cleanly.
+    Provide the final readiness verdict for the revised coding problem package.
+  expected_output: >
+    A short final summary: overall verdict (ready to use / needs fixes) + confirmation of resolved
+    issues and package health.
+  agent: coding_discrepancy_reviewer
+  output_file: "docs/{subject}/generated/coding/{name}-final-summary-revised.md"
+

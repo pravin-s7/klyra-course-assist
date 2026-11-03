@@ -53,3 +53,16 @@ class TranscriptResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
+
+
+class SubjectSkillResponse(BaseModel):
+    subject: str
+    config: dict[str, Any]
+    markdown: str
+
+
+class StructuredOutputsResponse(BaseModel):
+    subject: str
+    category: str | None = None
+    name: str | None = None
+    outputs: dict[str, Any]

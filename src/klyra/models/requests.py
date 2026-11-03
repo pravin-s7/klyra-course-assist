@@ -75,7 +75,7 @@ class ReviseTeachRequest(BaseModel):
 
 class CodeRequest(BaseModel):
     name: str = Field(..., min_length=1, description='Name for this problem set, e.g. "lab-3"')
-    language: str = Field(..., description="One of: python, java, c, cpp, bash")
+    language: str = Field(..., description="One of: python, java, c, cpp, bash, sql, postgresql, python-db")
     scope: str = Field(..., description='Which weeks: "all", "week_3", "week_1-week_4", "1-4", or "1,3,5"')
     difficulty: str = Field(..., description='e.g. "medium" or "40%% easy, 60%% hard"')
     num_questions: int = Field(..., ge=1, description="Total number of coding problems")
@@ -102,8 +102,16 @@ class CodeRequest(BaseModel):
 
 
 class ReviseCodeRequest(BaseModel):
-    language: str = Field(..., description="One of: python, java, c, cpp, bash")
+    language: str = Field(..., description="One of: python, java, c, cpp, bash, sql, postgresql, python-db")
     notes: str | None = Field(
         default=None,
         description='Specific manual edits, e.g. "problem 2\'s constraints are unclear about negative numbers"',
+    )
+
+
+class SkillUpdateRequest(BaseModel):
+    markdown: str = Field(
+        ...,
+        min_length=10,
+        description="Complete skill.md content with YAML frontmatter and markdown sections.",
     )

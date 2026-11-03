@@ -11,29 +11,297 @@ system) so we get explicit control over per-subject collections and metadata fil
 from __future__ import annotations
 
 import atexit
+import math
 import os
+import re
 import uuid
+from collections import Counter
 from functools import lru_cache
 from typing import Any, Iterable
 
+from klyra.core.retry import call_with_retry
+from klyra.utils import fs
+
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchAny,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
+
+_COLLECTION_SUFFIXES = ("-syllabus", "-pyq", "-parsed", "-images")
+
+_BM25_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "has",
+        "he",
+        "in",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "to",
+        "was",
+        "were",
+        "will",
+        "with",
+        "what",
+        "which",
+        "how",
+        "why",
+        "when",
+        "where",
+        "who",
+    }
+)
+
+
+def _validate_collection_subject(subject: str) -> str:
+    return fs.validate_subject(subject)
 
 
 def syllabus_collection_name(subject: str) -> str:
-    return f"{subject}-syllabus"
+    return f"{_validate_collection_subject(subject)}-syllabus"
 
 
 def pyq_collection_name(subject: str) -> str:
-    return f"{subject}-pyq"
+    return f"{_validate_collection_subject(subject)}-pyq"
 
 
 def parsed_collection_name(subject: str) -> str:
-    return f"{subject}-parsed"
+    return f"{_validate_collection_subject(subject)}-parsed"
 
 
 def images_collection_name(subject: str) -> str:
-    return f"{subject}-images"
+    return f"{_validate_collection_subject(subject)}-images"
+
+
+def extract_subject_from_collection(collection_name: str) -> str | None:
+    """Extract the validated `<subject>` prefix from a standard Klyra collection name."""
+    for suffix in _COLLECTION_SUFFIXES:
+        if collection_name.endswith(suffix) and len(collection_name) > len(suffix):
+            candidate = collection_name[: -len(suffix)]
+            try:
+                return fs.validate_subject(candidate)
+            except Exception:
+                return None
+    return None
+
+
+def _build_conditions(where: dict[str, Any]) -> tuple[list[Any], list[Any]]:
+    """Recursively convert a metadata `where` dict into Qdrant `must` and `should` clauses.
+
+    Supports:
+      - Flat key-value pairs: `{"week": 1, "source_file": "lec1.pdf"}`
+      - Multi-value lists/tuples/sets: `{"week": [1, 2]}` -> `MatchAny`
+      - Nested logical operators: `{"$and": [{...}, {...}]}` and `{"$or": [{...}, {...}]}`
+    """
+    must_clauses: list[Any] = []
+    should_clauses: list[Any] = []
+
+    for key, val in where.items():
+        if key == "$and":
+            if isinstance(val, (list, tuple)):
+                for sub in val:
+                    if isinstance(sub, dict):
+                        sub_must, sub_should = _build_conditions(sub)
+                        must_clauses.extend(sub_must)
+                        if sub_should:
+                            must_clauses.append(Filter(should=sub_should))
+        elif key == "$or":
+            if isinstance(val, (list, tuple)):
+                for sub in val:
+                    if isinstance(sub, dict):
+                        sub_must, sub_should = _build_conditions(sub)
+                        if len(sub_must) == 1 and not sub_should:
+                            should_clauses.append(sub_must[0])
+                        elif sub_must or sub_should:
+                            should_clauses.append(
+                                Filter(
+                                    must=sub_must or None,
+                                    should=sub_should or None,
+                                )
+                            )
+        else:
+            if val is None:
+                continue
+            if isinstance(val, (list, tuple, set)):
+                values = list(val)
+                if len(values) == 1:
+                    must_clauses.append(
+                        FieldCondition(key=key, match=MatchValue(value=values[0]))
+                    )
+                elif values:
+                    must_clauses.append(
+                        FieldCondition(key=key, match=MatchAny(any=values))
+                    )
+            else:
+                must_clauses.append(FieldCondition(key=key, match=MatchValue(value=val)))
+
+    return must_clauses, should_clauses
+
+
+def _build_filter(where: dict[str, Any] | None, subject: str | None = None) -> Filter | None:
+    """Build a Qdrant `Filter` from a `where` dictionary (supporting `$and`, `$or`,
+    and list values), optionally enforcing explicit `subject` payload matching."""
+    effective_where: dict[str, Any] = {}
+    if where:
+        effective_where.update(where)
+    if subject:
+        effective_where["subject"] = subject
+    if not effective_where:
+        return None
+
+    must_clauses, should_clauses = _build_conditions(effective_where)
+    if not must_clauses and not should_clauses:
+        return None
+    return Filter(
+        must=must_clauses or None,
+        should=should_clauses or None,
+    )
+
+
+def _is_subject_compatible(payload: dict[str, Any] | None, expected_subject: str | None) -> bool:
+    """Ensure a retrieved record does not belong to a different course/subject."""
+    if not expected_subject or not payload:
+        return True
+    rec_subj = payload.get("subject")
+    if rec_subj is None:
+        return True
+    return str(rec_subj) == str(expected_subject)
+
+
+def _tokenize_for_bm25(text: str) -> list[str]:
+    """Tokenize text for BM25 while preserving technical identifiers (`3nf`, `bcnf`,
+    `strtok`, `chmod`, `4755`, `w03-q02`, `c++`)."""
+    if not text:
+        return []
+    raw_tokens = re.findall(r"[A-Za-z0-9_+#.-]+", text.lower())
+    tokens: list[str] = []
+    for tok in raw_tokens:
+        cleaned = tok.strip("._-")
+        if not cleaned or cleaned in _BM25_STOPWORDS:
+            continue
+        tokens.append(cleaned)
+        # Also split hyphenated/snake_case compound identifiers so both exact and sub-tokens match
+        if "-" in cleaned or "_" in cleaned:
+            for part in re.split(r"[-_]+", cleaned):
+                part = part.strip(".")
+                if part and part not in _BM25_STOPWORDS and part != cleaned:
+                    tokens.append(part)
+    return tokens
+
+
+def compute_bm25_scores(
+    query_text: str,
+    documents: list[str],
+    *,
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> list[float]:
+    """Compute Okapi BM25 scores for `documents` against `query_text`, with an
+    additional lexical boost for exact technical identifiers / acronyms."""
+    n_docs = len(documents)
+    if n_docs == 0:
+        return []
+
+    query_tokens = _tokenize_for_bm25(query_text)
+    if not query_tokens:
+        return [0.0] * n_docs
+
+    doc_token_lists = [_tokenize_for_bm25(doc) for doc in documents]
+    doc_lengths = [len(tokens) for tokens in doc_token_lists]
+    avgdl = (sum(doc_lengths) / n_docs) if n_docs > 0 else 1.0
+    if avgdl <= 0:
+        avgdl = 1.0
+
+    # Document frequencies for query terms
+    unique_query_terms = set(query_tokens)
+    df: dict[str, int] = {term: 0 for term in unique_query_terms}
+    doc_counters: list[Counter[str]] = []
+    for tokens in doc_token_lists:
+        counts = Counter(tokens)
+        doc_counters.append(counts)
+        for term in unique_query_terms:
+            if counts.get(term, 0) > 0:
+                df[term] += 1
+
+    # Extract high-signal technical tokens (acronyms like BCNF, identifiers with digits/underscores)
+    raw_identifiers = [
+        tok.strip(".,;:!?()[]{}\"'")
+        for tok in query_text.split()
+        if len(tok.strip(".,;:!?()[]{}\"'")) >= 2
+        and (
+            any(ch.isupper() for ch in tok[1:])
+            or tok.isupper()
+            or "_" in tok
+            or any(ch.isdigit() for ch in tok)
+        )
+    ]
+
+    scores: list[float] = []
+    for idx, counts in enumerate(doc_counters):
+        dl = doc_lengths[idx]
+        score = 0.0
+        for term in query_tokens:
+            tf = counts.get(term, 0)
+            if tf == 0:
+                continue
+            n_q = df.get(term, 0)
+            idf = math.log(1.0 + (n_docs - n_q + 0.5) / (n_q + 0.5))
+            denom = tf + k1 * (1.0 - b + b * (dl / avgdl))
+            score += idf * ((tf * (k1 + 1.0)) / denom)
+
+        if score > 0 and raw_identifiers:
+            doc_lower = documents[idx].lower()
+            for ident in raw_identifiers:
+                if ident.lower() in doc_lower:
+                    score *= 1.25
+
+        scores.append(score)
+
+    return scores
+
+
+def reciprocal_rank_fusion(
+    dense_ranked_ids: list[str],
+    sparse_ranked_ids: list[str],
+    sparse_scores: dict[str, float],
+    *,
+    rrf_k: int = 60,
+    dense_weight: float = 1.0,
+    sparse_weight: float = 1.0,
+) -> dict[str, float]:
+    """Fuse dense vector rankings and sparse BM25 rankings using Reciprocal Rank Fusion (RRF)."""
+    fused: dict[str, float] = {}
+    for rank, doc_id in enumerate(dense_ranked_ids, start=1):
+        fused[doc_id] = fused.get(doc_id, 0.0) + dense_weight / (rrf_k + rank)
+
+    for rank, doc_id in enumerate(sparse_ranked_ids, start=1):
+        bm25_val = sparse_scores.get(doc_id, 0.0)
+        if bm25_val <= 0.0:
+            continue
+        fused[doc_id] = fused.get(doc_id, 0.0) + sparse_weight / (rrf_k + rank)
+
+    return fused
 
 
 @lru_cache(maxsize=1)
@@ -105,7 +373,8 @@ def add_chunks(collection_name: str, chunks: Iterable[dict[str, Any]]) -> int:
     client = get_client()
     get_or_create_collection(collection_name)
     emb_fn = get_embedding_function()
-    
+    inferred_subject = extract_subject_from_collection(collection_name)
+
     ids = []
     documents = []
     metadatas = []
@@ -113,50 +382,178 @@ def add_chunks(collection_name: str, chunks: Iterable[dict[str, Any]]) -> int:
         ids.append(chunk.get("id") or str(uuid.uuid4()))
         documents.append(chunk["text"])
         metadatas.append(chunk.get("metadata") or {})
-        
+
     if not documents:
         return 0
-        
-    embeddings = emb_fn(documents)
-    
+
+    embeddings = call_with_retry(lambda: emb_fn(documents))
+
     points = []
     for id_, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
         meta_with_doc = meta.copy()
+        if inferred_subject and "subject" not in meta_with_doc:
+            meta_with_doc["subject"] = inferred_subject
         meta_with_doc["_document"] = doc
         points.append(PointStruct(id=id_, vector=emb, payload=meta_with_doc))
-        
+
     client.upsert(collection_name=collection_name, points=points)
     return len(points)
 
 
+def _format_searchable_text(doc: str, meta: dict[str, Any]) -> str:
+    """Combine document text with key metadata fields (`concept`, `topic`, `source_file`)
+    so BM25 lexical scoring matches both body text and indexed concept titles."""
+    extra_parts: list[str] = []
+    for key in ("concept", "topic", "source_file"):
+        val = meta.get(key)
+        if val:
+            extra_parts.append(str(val))
+    if extra_parts:
+        return f"{' '.join(extra_parts)}\n{doc}"
+    return doc
+
+
 def query(
-    collection_name: str, query_text: str, n_results: int = 5, where: dict | None = None
+    collection_name: str,
+    query_text: str,
+    n_results: int = 5,
+    where: dict | None = None,
+    *,
+    hybrid: bool = True,
+    rrf_k: int = 60,
 ) -> list[dict]:
+    """Query `collection_name` using hybrid search (dense cosine vector similarity
+    fused with sparse BM25 lexical ranking via Reciprocal Rank Fusion) and
+    strict cross-course subject isolation."""
     client = get_client()
     if not client.collection_exists(collection_name):
         return []
-    
+
+    inferred_subject = extract_subject_from_collection(collection_name)
     emb_fn = get_embedding_function()
-    query_emb = emb_fn([query_text])[0]
-    
-    query_filter = None
-    if where:
-        must_conditions = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in where.items()]
-        query_filter = Filter(must=must_conditions)
-        
-    results = client.query_points(
+    query_emb = call_with_retry(lambda: emb_fn([query_text]))[0]
+
+    query_filter = _build_filter(where)
+    dense_limit = max(n_results * 4, 20) if hybrid else n_results
+
+    dense_hits = client.query_points(
         collection_name=collection_name,
         query=query_emb,
-        limit=n_results,
+        limit=dense_limit,
         query_filter=query_filter,
-        with_payload=True
+        with_payload=True,
     ).points
-    
-    matches = []
-    for hit in results:
-        meta = hit.payload.copy() if hit.payload else {}
-        doc = meta.pop("_document", "")
-        matches.append({"id": str(hit.id), "text": doc, "metadata": meta, "distance": hit.score})
+
+    candidates: dict[str, dict[str, Any]] = {}
+    dense_ranked_ids: list[str] = []
+
+    for hit in dense_hits:
+        raw_payload = hit.payload.copy() if hit.payload else {}
+        if not _is_subject_compatible(raw_payload, inferred_subject):
+            continue
+        doc = raw_payload.pop("_document", "")
+        doc_id = str(hit.id)
+        dense_score = float(hit.score) if hit.score is not None else 0.0
+        candidates[doc_id] = {
+            "id": doc_id,
+            "text": doc,
+            "metadata": raw_payload,
+            "dense_score": dense_score,
+        }
+        dense_ranked_ids.append(doc_id)
+
+    if not hybrid:
+        return [
+            {
+                "id": item["id"],
+                "text": item["text"],
+                "metadata": item["metadata"],
+                "distance": item["dense_score"],
+            }
+            for item in list(candidates.values())[:n_results]
+        ]
+
+    # Gather additional lexical candidates from the collection so exact technical terms
+    # (e.g. `BCNF`, `strtok`, `chmod 4755`) that rank outside dense top-K are still retrieved
+    try:
+        scroll_records, _ = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=max(n_results * 10, 200),
+            with_payload=True,
+        )
+        for rec in scroll_records or []:
+            raw_payload = rec.payload.copy() if rec.payload else {}
+            if not _is_subject_compatible(raw_payload, inferred_subject):
+                continue
+            doc_id = str(rec.id)
+            if doc_id not in candidates:
+                doc = raw_payload.pop("_document", "")
+                candidates[doc_id] = {
+                    "id": doc_id,
+                    "text": doc,
+                    "metadata": raw_payload,
+                    "dense_score": 0.0,
+                }
+    except Exception:
+        # Gracefully degrade if client is a lightweight mock without scroll support
+        pass
+
+    if not candidates:
+        return []
+
+    candidate_ids = list(candidates.keys())
+    searchable_texts = [
+        _format_searchable_text(candidates[cid]["text"], candidates[cid]["metadata"])
+        for cid in candidate_ids
+    ]
+    bm25_raw = compute_bm25_scores(query_text, searchable_texts)
+    sparse_scores = {cid: score for cid, score in zip(candidate_ids, bm25_raw)}
+
+    sparse_ranked_ids = [
+        cid
+        for cid, score in sorted(
+            sparse_scores.items(),
+            key=lambda kv: (kv[1], candidates[kv[0]]["dense_score"]),
+            reverse=True,
+        )
+        if score > 0.0
+    ]
+
+    fused_scores = reciprocal_rank_fusion(
+        dense_ranked_ids=dense_ranked_ids,
+        sparse_ranked_ids=sparse_ranked_ids,
+        sparse_scores=sparse_scores,
+        rrf_k=rrf_k,
+    )
+
+    # Include any candidate that had 0 BM25 score and wasn't in dense_ranked_ids
+    for cid in candidate_ids:
+        fused_scores.setdefault(cid, 0.0)
+
+    ranked_ids = sorted(
+        candidate_ids,
+        key=lambda cid: (
+            fused_scores.get(cid, 0.0),
+            sparse_scores.get(cid, 0.0),
+            candidates[cid]["dense_score"],
+        ),
+        reverse=True,
+    )
+
+    matches: list[dict[str, Any]] = []
+    for cid in ranked_ids[:n_results]:
+        item = candidates[cid]
+        matches.append(
+            {
+                "id": item["id"],
+                "text": item["text"],
+                "metadata": item["metadata"],
+                "distance": item["dense_score"] or fused_scores.get(cid, 0.0),
+                "rrf_score": round(fused_scores.get(cid, 0.0), 6),
+                "bm25_score": round(sparse_scores.get(cid, 0.0), 4),
+            }
+        )
     return matches
 
 
@@ -164,14 +561,11 @@ def delete_by_source_file(collection_name: str, source_file: str) -> None:
     client = get_client()
     if not client.collection_exists(collection_name):
         return
-        
-    query_filter = Filter(
-        must=[FieldCondition(key="source_file", match=MatchValue(value=source_file))]
-    )
-    
+
+    query_filter = _build_filter({"source_file": source_file})
     client.delete(
         collection_name=collection_name,
-        points_selector=query_filter
+        points_selector=query_filter,
     )
 
 
@@ -179,22 +573,22 @@ def get_by_metadata(collection_name: str, where: dict | None = None, limit: int 
     client = get_client()
     if not client.collection_exists(collection_name):
         return []
-    
-    query_filter = None
-    if where:
-        must_conditions = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in where.items()]
-        query_filter = Filter(must=must_conditions)
-        
+
+    inferred_subject = extract_subject_from_collection(collection_name)
+    query_filter = _build_filter(where)
+
     records, _ = client.scroll(
         collection_name=collection_name,
         scroll_filter=query_filter,
         limit=limit,
-        with_payload=True
+        with_payload=True,
     )
-    
+
     docs = []
     for r in records:
         meta = r.payload.copy() if r.payload else {}
+        if not _is_subject_compatible(meta, inferred_subject):
+            continue
         doc = meta.pop("_document", "")
         docs.append({"text": doc, "metadata": meta})
     return docs
@@ -204,24 +598,24 @@ def list_distinct_metadata_values(collection_name: str, field: str, where: dict 
     client = get_client()
     if not client.collection_exists(collection_name):
         return []
-        
-    query_filter = None
-    if where:
-        must_conditions = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in where.items()]
-        query_filter = Filter(must=must_conditions)
-        
+
+    inferred_subject = extract_subject_from_collection(collection_name)
+    query_filter = _build_filter(where)
+
     records, _ = client.scroll(
         collection_name=collection_name,
         scroll_filter=query_filter,
         limit=10000,
-        with_payload=True
+        with_payload=True,
     )
-    
+
     values = set()
     for r in records:
         if r.payload and field in r.payload:
+            if not _is_subject_compatible(r.payload, inferred_subject):
+                continue
             values.add(str(r.payload[field]))
-            
+
     return sorted(list(values))
 
 
@@ -229,13 +623,14 @@ def delete_by_metadata(collection_name: str, where: dict) -> None:
     client = get_client()
     if not client.collection_exists(collection_name):
         return
-        
-    must_conditions = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in where.items()]
-    query_filter = Filter(must=must_conditions)
-    
+
+    query_filter = _build_filter(where)
+    if query_filter is None:
+        return
+
     client.delete(
         collection_name=collection_name,
-        points_selector=query_filter
+        points_selector=query_filter,
     )
 
 

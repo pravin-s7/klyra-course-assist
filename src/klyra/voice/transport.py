@@ -247,8 +247,8 @@ class PyAudioTransport(AudioTransport):
                 except Exception:
                     pass  # best-effort cleanup
 
-        if self._pa is not None:
-            self._pa.terminate()
+        # if self._pa is not None:
+        #     self._pa.terminate()  # Removed to prevent segfaults on Ctrl+C while thread is reading
 
         self._mic_stream = None
         self._spk_stream = None

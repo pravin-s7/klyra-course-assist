@@ -10,7 +10,9 @@ convert_documents_task:
     math/tables/images exactly and a manual rewrite risks subtly altering
     them. If the input is a question paper (filename ending in -qp.md), you
     MUST call format_latex_as_exam on the resulting .tex file to convert it 
-    into the Overleaf exam class format before finishing.
+    into the Overleaf exam class format before finishing. If
+    format_latex_as_exam is unavailable or fails, report the failure in your
+    output rather than delivering unconverted LaTeX.
 
     If convert_latex_to_markdown reports that raw LaTeX blocks survived
     (pandoc couldn't translate them, e.g. a raw tikzpicture), it gives you

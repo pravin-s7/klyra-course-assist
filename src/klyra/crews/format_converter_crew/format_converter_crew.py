@@ -10,7 +10,9 @@ from crewai import Agent, Crew, Process, Task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 
+from klyra.crews.base_task import KlyraTask
 from klyra.llm_config import default_llm, default_embedder
+from klyra.models.task_outputs import ConversionReportOutput
 from klyra.tools.format_conversion import (
     ConvertLatexToMarkdownTool,
     ConvertMarkdownToLatexTool,
@@ -19,6 +21,7 @@ from klyra.tools.format_conversion import (
 )
 from klyra.tools.image_tools import SearchImagesTool
 from klyra.tools.latex_diagram_tool import GenerateDiagramTool, GenerateGraphTool
+from klyra.utils.task_guardrails import conversion_report_guardrail
 
 
 @CrewBase
@@ -49,7 +52,11 @@ class FormatConverterCrew:
 
     @task
     def convert_documents_task(self) -> Task:
-        return Task(config=self.tasks_config["convert_documents_task"])  # type: ignore[index]
+        return KlyraTask(
+            config=self.tasks_config["convert_documents_task"],  # type: ignore[index]
+            output_pydantic=ConversionReportOutput,
+            guardrail=conversion_report_guardrail,
+        )
 
     @crew
     def crew(self) -> Crew:

@@ -671,6 +671,24 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
                 audio_data = raw["bytes"]
                 if voice_session_ref["active"] and voice_session_ref["session"]:
                     try:
+                        # Log length periodically and check volume
+                        if not hasattr(ws, "_audio_bytes"):
+                            ws._audio_bytes = 0
+                            ws._audio_sum = 0
+                        ws._audio_bytes += len(audio_data)
+                        # quick and dirty sum of absolute 16-bit values
+                        import struct
+                        shorts = struct.unpack(f"<{len(audio_data)//2}h", audio_data)
+                        ws._audio_sum += sum(abs(x) for x in shorts)
+                        
+                        if ws._audio_bytes > 16000 * 2: # log every 1 second of audio
+                            avg = ws._audio_sum / (ws._audio_bytes / 2)
+                            logger.info(f"Received {ws._audio_bytes} bytes from web. Avg Volume: {avg:.2f}")
+                            if avg < 5.0:
+                                logger.warning("Web audio is SILENT (mic not picking up sound or browser not sending it)")
+                            ws._audio_bytes = 0
+                            ws._audio_sum = 0
+
                         await voice_session_ref["session"].send_realtime_input(
                             audio={"data": audio_data, "mime_type": "audio/pcm;rate=16000"}
                         )
@@ -729,7 +747,7 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
                     # Start voice session
                     if not voice_session_ref["active"]:
                         voice_session_task = asyncio.create_task(
-                            _run_voice_session(ws, voice_session_ref, chat_history_for_voice, orchestrator, session_id, user, _sync_save)
+                            _run_voice_session(ws, voice_session_ref, chat_history_for_voice, orchestrator, session_id, user, _sync_save, allowed_subjects)
                         )
 
                 elif msg_type == "voice_stop":
@@ -760,7 +778,7 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
         await _stop_voice(voice_session_task, voice_session_ref)
 
 
-async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orchestrator, session_id: str, user, sync_save):
+async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orchestrator, session_id: str, user, sync_save, allowed_subjects: set | None = None):
     """Run a Gemini Live API voice session, forwarding audio/events to the WebSocket."""
     from google import genai
     from google.genai import types
@@ -769,7 +787,7 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
     from klyra.core import SYSTEM_INSTRUCTION
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    model = os.environ.get("KLYRA_VOICE_MODEL", "gemini-3.1-flash-live-preview")
+    model = os.environ.get("KLYRA_VOICE_MODEL", "gemini-3.8-live")
     voice_name = os.environ.get("KLYRA_VOICE_NAME", "Zephyr")
     client = genai.Client(api_key=api_key)
 

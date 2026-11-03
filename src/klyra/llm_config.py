@@ -1,71 +1,46 @@
 """Shared LLM factory for all Klyra agents.
 
-Per .cursor/rules/klyra.mdc, Gemini 3.1 Flash Lite is the recommended
-default: natively multimodal (text/image/video/audio/pdf) and, on a real
-free-tier account, "Flash Lite" variants were observed getting 10-15
-requests/minute vs. just 5 RPM for the full "Flash" models (2.5/3/3.5/3.7) -
-2-3x more headroom for the same cost tier. Overridable via KLYRA_LLM_MODEL
-- e.g. set it to "gemini/gemini-pro-latest" if you have billing set up and
-want a stronger model (Pro-class models have zero free-tier quota).
+All agents default to ``KLYRA_MODEL`` (env var, default
+``gemini-3.5-flash-lite``).  Individual overrides are still possible
+via ``KLYRA_CODING_LLM_MODEL`` etc., but the common case is one knob.
+
+Retry/timeout configuration is centralised in ``klyra.core.retry``.
 """
 from __future__ import annotations
 
 import os
 
+from klyra.core.retry import sdk_retry_options
 
-def default_llm():
+
+def _make_llm(env_var: str, *, prefix: str = "gemini/"):
+    """Create a CrewAI LLM using the model name from *env_var*.
+
+    Falls back to ``KLYRA_MODEL`` → ``gemini-3.5-flash-lite``.
+    *prefix* is prepended if the value doesn't already contain a '/'.
+    """
     from crewai import LLM
 
-    model = os.environ.get("KLYRA_LLM_MODEL", "gemini/gemini-3.1-flash-lite")
-    # The plain `timeout=` kwarg on LLM(...) is silently dropped for the
-    # native Gemini provider (GeminiCompletion has no such field) - the
-    # google-genai client's own http_options must be reached via
-    # client_params instead, which GeminiCompletion._initialize_client
-    # merges straight into genai.Client(...). Without this, the SDK's own
-    # internal 5xx/429 retry can compound with CrewAI's per-task retry into
-    # multi-minute hangs during a demand spike (observed directly).
-    timeout_ms = int(float(os.environ.get("KLYRA_LLM_TIMEOUT_SECONDS", "30")) * 1000)
-    retry_attempts = int(os.environ.get("KLYRA_LLM_RETRY_ATTEMPTS", "10"))
+    base_default = os.environ.get("KLYRA_MODEL", "gemini-3.5-flash-lite")
+    raw = os.environ.get(env_var) or base_default
+    model = raw if "/" in raw else f"{prefix}{raw}"
     return LLM(
         model=model,
-        client_params={
-            "http_options": {
-                "timeout": timeout_ms,
-                "retry_options": {
-                    "attempts": retry_attempts,
-                    "initial_delay": 2.0,
-                    "max_delay": 65.0,
-                },
-            }
-        },
+        client_params={"http_options": sdk_retry_options()},
     )
+
+
+def default_llm():
+    """LLM for most agents (syllabus indexer, QP creator, reviewer, …)."""
+    return _make_llm("KLYRA_LLM_MODEL")
 
 
 def coding_llm():
-    from crewai import LLM
-
-    model = os.environ.get("KLYRA_CODING_LLM_MODEL", "gemini/gemini-3.5-flash-lite")
-    timeout_ms = int(float(os.environ.get("KLYRA_LLM_TIMEOUT_SECONDS", "30")) * 1000)
-    retry_attempts = int(os.environ.get("KLYRA_LLM_RETRY_ATTEMPTS", "10"))
-    
-    return LLM(
-        model=model,
-        client_params={
-            "http_options": {
-                "timeout": timeout_ms,
-                "retry_options": {
-                    "attempts": retry_attempts,
-                    "initial_delay": 2.0,
-                    "max_delay": 65.0,
-                },
-            }
-        },
-    )
+    """LLM for coding-problem agents (may use a stronger model)."""
+    return _make_llm("KLYRA_CODING_LLM_MODEL")
 
 
 def default_embedder():
-    import os
-
     provider = os.environ.get("EMBEDDING_PROVIDER", "default")
     if provider == "openai":
         return {

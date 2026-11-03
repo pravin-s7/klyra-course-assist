@@ -6,6 +6,7 @@ from typing import Any
 
 def run_revision(subject: str, qp_name: str, notes: str | None = None) -> Any:
     from klyra.crews.revision_crew.revision_crew import RevisionCrew
+    from klyra.services.skill_service import build_skill_prompt_inputs
     from klyra.utils import fs
 
     fs.check_subject_exists(subject)
@@ -27,12 +28,27 @@ def run_revision(subject: str, qp_name: str, notes: str | None = None) -> Any:
         "answer_key_content": _read("answer-key"),
         "final_summary_content": _read("final-summary"),
         "manual_instructions": notes or "(none - just fix what the automated review flagged)",
+        **build_skill_prompt_inputs(subject),
     }
     
-    import os
-    from unittest.mock import patch
-    import crewai_core.paths
-    
-    mem_dir = os.path.abspath(f".memories/{subject}/{slug}")
-    with patch("crewai_core.paths.db_storage_path", return_value=mem_dir):
-        return RevisionCrew().crew().kickoff(inputs=inputs)
+    import shutil
+
+    with fs.crewai_storage_context(f".memories/{subject}/{slug}"):
+        result = RevisionCrew().crew().kickoff(inputs=inputs)
+
+    # Synchronize revised companion files (.md and .json) to the active canonical files
+    # so that answer-key, discrepancy-report, and final-summary are updated.
+    for base, revised in [
+        ("qp", "qp-revised"),
+        ("answer-key", "answer-key-revised"),
+        ("discrepancy-report", "discrepancy-report-revised"),
+        ("final-summary", "final-summary-revised"),
+    ]:
+        for ext in (".md", ".json"):
+            rev_path = generated / f"{slug}-{revised}{ext}"
+            base_path = generated / f"{slug}-{base}{ext}"
+            if rev_path.exists():
+                shutil.copy2(rev_path, base_path)
+
+    return result
+

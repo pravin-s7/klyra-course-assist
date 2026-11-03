@@ -20,9 +20,40 @@ prepare_teaching_material_task:
     questions for the end of the session. Follow the instructor's notes on
     emphasis, depth, and format even where they add to or reshape this
     default structure - the notes take priority over the default structure.
+
+    **CRITICAL REQUIREMENT:** Write the material in a highly conversational, 
+    engaging, and human tone. Do not use dry, encyclopedic phrasing. Present 
+    the concepts as if you are passionately explaining them to a student in 
+    real-time, using analogies and thought-provoking questions to spark their 
+    curiosity.
+
+    **SUBJECT SKILL & TEACHING FORMAT RULES (`docs/{subject}/skill.md`):**
+    {subject_skill_rules}
+    {subject_diagram_rules}
+    {subject_teaching_format}
   expected_output: >
-    Complete teaching material in markdown: session outline, per-concept
-    explanations with worked examples and diagrams where relevant, and a
-    short set of wrap-up discussion questions.
+    Complete, highly engaging teaching material in markdown: session outline, 
+    per-concept explanations with worked examples and diagrams where relevant, 
+    and a short set of wrap-up discussion questions.
   agent: teaching_material_preparer
   output_file: "docs/{subject}/generated/teaching/{session_name}-teaching-material.md"
+
+prepare_teaching_answers_task:
+  description: >
+    Create the companion Instructor Guide & Answer Key for the teaching material
+    prepared above for subject "{subject}".
+
+    For every worked example and calculation in the teaching material:
+    - Provide the complete, rigorous mathematical or algorithmic derivation step-by-step.
+    - Highlight common student misconceptions and points where students typically get stuck.
+
+    For every discussion / check-in question in the teaching material:
+    - Provide the authoritative model answer and key points the instructor should look for.
+    - Provide follow-up probing questions to deepen student understanding.
+    - Include grading/evaluation criteria or rubric if applicable.
+  expected_output: >
+    The companion Instructor Guide & Answer Key in markdown, covering step-by-step solutions
+    to all worked examples and comprehensive model answers/rubrics for all discussion questions.
+  agent: teaching_answers_preparer
+  output_file: "docs/{subject}/generated/teaching/{session_name}-teaching-answers.md"
+

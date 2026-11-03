@@ -29,6 +29,8 @@ is used, so `docker run` never tries (and fails) to pull the name.
 """
 from __future__ import annotations
 
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -103,15 +105,31 @@ LANGUAGE_RUNNERS: dict[str, LanguageRunner] = {
         image="postgres:16-alpine",
         filename="solution.sql",
         compile_cmd=None,
-        run_cmd=["sh", "-c", "mkdir -p /tmp/pgdata && chown postgres:postgres /tmp/pgdata && su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1 && su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1 && cat - solution.sql | su-exec postgres psql -q -d postgres"],
+        run_cmd=[
+            "sh",
+            "-c",
+            "mkdir -p /tmp/pgdata /run/postgresql && chown postgres:postgres /tmp/pgdata /run/postgresql && su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1 && su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1 && cat - solution.sql | su-exec postgres psql -q -d postgres",
+        ],
     ),
     "python-db": LanguageRunner(
         image="klyra-python-postgres-runner:latest",
         filename="solution.py",
         compile_cmd=None,
-        run_cmd=["sh", "-c", "mkdir -p /tmp/pgdata && chown postgres:postgres /tmp/pgdata && su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1 && su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1 && cat - > schema.sql && su-exec postgres psql -q -d postgres -f schema.sql >/dev/null 2>&1 && python3 solution.py"],
+        run_cmd=[
+            "sh",
+            "-c",
+            "mkdir -p /tmp/pgdata /run/postgresql && chown postgres:postgres /tmp/pgdata /run/postgresql && su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1 && su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1 && cat - > schema.sql && su-exec postgres psql -q -d postgres -f schema.sql >/dev/null 2>&1 && for db in lis flis $(grep -oE \"(database|dbname)[[:space:]]*=[[:space:]]*['\\\"][a-zA-Z0-9_]+['\\\"]\" solution.py 2>/dev/null | sed -E \"s/.*['\\\"]([a-zA-Z0-9_]+)['\\\"].*/\\1/\"); do if [ \"$db\" != \"postgres\" ] && [ \"$db\" != \"template1\" ]; then su-exec postgres psql -q -d template1 -c \"DROP DATABASE IF EXISTS \\\"$db\\\" WITH (FORCE);\" -c \"CREATE DATABASE \\\"$db\\\" TEMPLATE postgres;\" >/dev/null 2>&1 || true; fi; done && for tf in $(grep -oE \"['\\\"][a-zA-Z0-9_.-]+\\.txt['\\\"]\" solution.py 2>/dev/null | tr -d \"'\\\"\"); do if [ ! -f \"$tf\" ]; then grep -vE \"^[[:space:]]*(CREATE|INSERT|DROP|ALTER|BEGIN|COMMIT|--|\\\\\\\\copy|SELECT|VALUES|\\)|;|$)\" schema.sql > \"$tf\" 2>/dev/null || cp schema.sql \"$tf\"; fi; done && PGUSER=postgres PGPASSWORD=postgres PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres python3 solution.py < schema.sql",
+        ],
     ),
 }
+
+
+def _resolve_runner_language(language: str, source_code: str) -> str:
+    """Auto-upgrade `python` to `python-db` when `psycopg2` is imported in `source_code`."""
+    key = (language or "").strip().lower()
+    if key == "python" and source_code and ("psycopg2" in source_code or "pg8000" in source_code):
+        return "python-db"
+    return key
 
 
 def _docker_path() -> str:
@@ -183,9 +201,11 @@ def ensure_language_image(language: str) -> str | None:
     if language in ("bash", "sql"):
         image_name = BASH_RUNNER_IMAGE
         dockerfile_func = _bash_runner_dockerfile
+        dockerfile_name = "docker/bash-runner.Dockerfile"
     elif language == "python-db":
         image_name = PYTHON_POSTGRES_RUNNER_IMAGE
         dockerfile_func = _python_postgres_runner_dockerfile
+        dockerfile_name = "docker/python-postgres-runner.Dockerfile"
     else:
         return None
 
@@ -194,7 +214,7 @@ def ensure_language_image(language: str) -> str | None:
 
     dockerfile = dockerfile_func()
     if not dockerfile:
-        return f"Cannot build {image_name}: Dockerfile not found."
+        return f"Cannot build {image_name}: {dockerfile_name} not found."
 
     docker_bin = _docker_path()
     try:
@@ -273,6 +293,8 @@ def _normalize(text: str) -> str:
 
 @dataclass
 class TestCaseResult:
+    __test__ = False
+
     index: int
     passed: bool
     stdin: str
@@ -298,16 +320,123 @@ class ExecutionReport:
         return sum(1 for r in self.results if r.passed)
 
 
-def run_against_test_cases(
+def _clean_source_code(source_code: str, language: str) -> str:
+    """Sanitize LLM-generated source code before writing to the sandbox file.
+
+    1. Strips wrapping markdown code fences (```bash ... ```).
+    2. Detects and unwraps heredoc wrappers (e.g. `cat << 'EOF' > solution.sh ... EOF`),
+       which LLMs sometimes generate when trying to emulate an interactive shell session.
+    """
+    code = source_code.strip()
+
+    # 1. Strip markdown code fences if wrapped
+    if code.startswith("```"):
+        lines = code.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            code = "\n".join(lines[1:-1]).strip()
+
+    # 2. Extract inner code if wrapped in a heredoc redirection
+    # e.g., cat << 'EOF' > solution.sh \n <code> \n EOF
+    heredoc_match = re.search(
+        r"cat\s*<<\s*['\"]?(\w+)['\"]?\s*>\s*[^\n]+\n(.*?)\n\1",
+        code,
+        re.DOTALL,
+    )
+    if heredoc_match:
+        code = heredoc_match.group(2).strip()
+
+    return code
+
+
+def _build_batch_runner_script(
+    key: str,
+    runner: LanguageRunner,
+    num_cases: int,
+    timeout_seconds: int,
+) -> str:
+    """Build a self-contained POSIX shell script that compiles once (if needed),
+    initializes any stateful services once (e.g. PostgreSQL), and runs all
+    test cases sequentially inside a single pooled Docker container."""
+    lines = [
+        "#!/bin/sh",
+        "cd /sandbox || exit 101",
+    ]
+    if runner.compile_cmd:
+        compile_str = shlex.join(runner.compile_cmd)
+        lines.extend(
+            [
+                f"if ! {compile_str} >/sandbox/_klyra_batch/compile.err 2>&1; then",
+                "    exit 100",
+                "fi",
+            ]
+        )
+
+    if key in ("postgresql", "python-db"):
+        lines.extend(
+            [
+                "mkdir -p /tmp/pgdata /run/postgresql && chown postgres:postgres /tmp/pgdata /run/postgresql",
+                "su-exec postgres initdb -D /tmp/pgdata >/dev/null 2>&1",
+                "su-exec postgres pg_ctl -D /tmp/pgdata -w start >/dev/null 2>&1",
+            ]
+        )
+
+    for i in range(num_cases):
+        in_file = f"/sandbox/_klyra_batch/input_{i}.txt"
+        out_file = f"/sandbox/_klyra_batch/stdout_{i}.txt"
+        err_file = f"/sandbox/_klyra_batch/stderr_{i}.txt"
+        exit_file = f"/sandbox/_klyra_batch/exit_{i}.txt"
+
+        if key == "sql":
+            lines.append(
+                f"rm -f /tmp/klyra_test_{i}.db && "
+                f"timeout {timeout_seconds}s sh -c 'cat {in_file} solution.sql | sqlite3 /tmp/klyra_test_{i}.db' "
+                f">{out_file} 2>{err_file}"
+            )
+        elif key == "postgresql":
+            lines.extend(
+                [
+                    "su-exec postgres dropdb --if-exists klyra_test >/dev/null 2>&1 || true",
+                    "su-exec postgres createdb klyra_test >/dev/null 2>&1 || true",
+                    f"timeout {timeout_seconds}s sh -c 'cat {in_file} solution.sql | su-exec postgres psql -q -d klyra_test' "
+                    f">{out_file} 2>{err_file}",
+                ]
+            )
+        elif key == "python-db":
+            lines.extend(
+                [
+                    "rm -f /sandbox/*.txt /tmp/klyra_seed.sql",
+                    'su-exec postgres psql -q -d template1 -c "DROP DATABASE IF EXISTS postgres WITH (FORCE);" -c "CREATE DATABASE postgres;" >/dev/null 2>&1 || true',
+                    f'grep -vE "^[[:space:]]*(INIT_SCHEMA|INSERT_INPUT|SCHEMA:|INPUT:)[[:space:]]*$" {in_file} | grep -E "(;|^[[:space:]]*\\\\\\\\copy)" > /tmp/klyra_seed.sql 2>/dev/null || cp {in_file} /tmp/klyra_seed.sql',
+                    "su-exec postgres psql -q -d postgres -f /tmp/klyra_seed.sql >/dev/null 2>&1 || true",
+                    'for db in lis flis $(grep -oE "(database|dbname)[[:space:]]*=[[:space:]]*[\'\\"][a-zA-Z0-9_]+[\'\\"]" /sandbox/solution.py 2>/dev/null | sed -E "s/.*[\'\\"]([a-zA-Z0-9_]+)[\'\\"].*/\\1/"); do if [ "$db" != "postgres" ] && [ "$db" != "template1" ]; then su-exec postgres psql -q -d template1 -c "DROP DATABASE IF EXISTS \\"$db\\" WITH (FORCE);" -c "CREATE DATABASE \\"$db\\" TEMPLATE postgres;" >/dev/null 2>&1 || true; fi; done',
+                    f'for tf in $(grep -oE "[\'\\"][a-zA-Z0-9_.-]+\\.txt[\'\\"]" /sandbox/solution.py 2>/dev/null | tr -d "\'\\""); do if [ ! -f "/sandbox/$tf" ]; then grep -vE "^[[:space:]]*(INIT_SCHEMA|INSERT_INPUT|SCHEMA:|INPUT:|CREATE|INSERT|DROP|ALTER|BEGIN|COMMIT|--|\\\\\\\\copy|SELECT|VALUES|\\)|;|$)" {in_file} > "/sandbox/$tf" 2>/dev/null || cp {in_file} "/sandbox/$tf"; fi; done',
+                    f"timeout {timeout_seconds}s env PGUSER=postgres PGPASSWORD=postgres PGHOST=127.0.0.1 PGPORT=5432 PGDATABASE=postgres python3 solution.py <{in_file} >{out_file} 2>{err_file}",
+                ]
+            )
+        else:
+            run_str = shlex.join(runner.run_cmd)
+            lines.append(
+                f"timeout {timeout_seconds}s {run_str} <{in_file} >{out_file} 2>{err_file}"
+            )
+        lines.append(f"echo $? >{exit_file}")
+
+    if key in ("postgresql", "python-db"):
+        lines.append("su-exec postgres pg_ctl -D /tmp/pgdata -m fast stop >/dev/null 2>&1 || true")
+
+    lines.append("exit 0")
+    return "\n".join(lines) + "\n"
+
+
+def run_against_test_cases_batch(
     language: str,
     source_code: str,
     test_cases: list[dict],
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> ExecutionReport:
-    """Compiles `source_code` (if the language needs it) once, then runs it
-    once per test case (`{"input": str, "expected_output": str}`), each in
-    its own fresh container, comparing normalized stdout."""
-    key = language.strip().lower()
+    """Compile `source_code` (if needed) and execute all `test_cases` inside a
+    single pooled Docker container lifecycle, eliminating N-container startup
+    overhead and repeated PostgreSQL cluster initialization."""
+    key = _resolve_runner_language(language, source_code)
     if key not in LANGUAGE_RUNNERS:
         raise ValueError(f"Unsupported language {language!r}. Supported: {sorted(LANGUAGE_RUNNERS)}")
     runner = LANGUAGE_RUNNERS[key]
@@ -315,10 +444,154 @@ def run_against_test_cases(
     if image_error:
         raise DockerNotAvailableError(image_error)
 
+    clean_code = _clean_source_code(source_code, key)
+    with tempfile.TemporaryDirectory(prefix="klyra-batch-") as tmp:
+        workdir = Path(tmp)
+        workdir.chmod(0o777)
+        (workdir / runner.filename).write_text(clean_code, encoding="utf-8")
+
+        batch_dir = workdir / "_klyra_batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        batch_dir.chmod(0o777)
+
+        for i, case in enumerate(test_cases):
+            in_path = batch_dir / f"input_{i}.txt"
+            in_path.write_text(case.get("input", ""), encoding="utf-8")
+            in_path.chmod(0o666)
+
+        script_path = batch_dir / "run_batch.sh"
+        script_path.write_text(
+            _build_batch_runner_script(key, runner, len(test_cases), timeout_seconds),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+
+        total_timeout = (COMPILE_TIMEOUT_SECONDS if runner.compile_cmd else 5) + max(
+            1, len(test_cases)
+        ) * (timeout_seconds + 2)
+
+        batch_run = _docker_run(
+            image=runner.image,
+            workdir=workdir,
+            cmd=["sh", "/sandbox/_klyra_batch/run_batch.sh"],
+            stdin_text=None,
+            timeout_seconds=total_timeout,
+        )
+
+        compile_err_path = batch_dir / "compile.err"
+        if batch_run.exit_code == 100:
+            err_text = (
+                compile_err_path.read_text(encoding="utf-8", errors="replace").strip()
+                if compile_err_path.exists()
+                else ""
+            )
+            if not err_text:
+                err_text = batch_run.stderr.strip() or batch_run.stdout.strip() or "Compilation failed."
+            return ExecutionReport(compiled=False, compile_error=err_text, results=[])
+
+        if (
+            batch_run.timed_out
+            and runner.compile_cmd
+            and not (batch_dir / "exit_0.txt").exists()
+        ):
+            return ExecutionReport(compiled=False, compile_error="Compilation timed out.", results=[])
+
+        results: list[TestCaseResult] = []
+        for i, case in enumerate(test_cases):
+            stdin_text = case.get("input", "")
+            expected = case.get("expected_output", "")
+            out_path = batch_dir / f"stdout_{i}.txt"
+            err_path = batch_dir / f"stderr_{i}.txt"
+            exit_path = batch_dir / f"exit_{i}.txt"
+
+            if exit_path.exists():
+                raw_exit = exit_path.read_text(encoding="utf-8", errors="replace").strip()
+                code_val = int(raw_exit) if raw_exit.lstrip("-").isdigit() else batch_run.exit_code
+                stdout_val = (
+                    out_path.read_text(encoding="utf-8", errors="replace")
+                    if out_path.exists()
+                    else ""
+                )
+                stderr_val = (
+                    err_path.read_text(encoding="utf-8", errors="replace")
+                    if err_path.exists()
+                    else ""
+                )
+                timed_out = code_val == 124
+                exit_code = None if timed_out else code_val
+            elif batch_run.timed_out:
+                stdout_val = (
+                    out_path.read_text(encoding="utf-8", errors="replace")
+                    if out_path.exists()
+                    else batch_run.stdout
+                )
+                stderr_val = (
+                    err_path.read_text(encoding="utf-8", errors="replace")
+                    if err_path.exists()
+                    else batch_run.stderr
+                )
+                timed_out = True
+                exit_code = None
+            else:
+                # Fallback when subprocess.run is mocked without writing per-case batch files
+                stdout_val = batch_run.stdout
+                stderr_val = batch_run.stderr
+                timed_out = False
+                exit_code = batch_run.exit_code
+
+            passed = (
+                not timed_out
+                and exit_code == 0
+                and _normalize(stdout_val) == _normalize(expected)
+            )
+            results.append(
+                TestCaseResult(
+                    index=i,
+                    passed=passed,
+                    stdin=stdin_text,
+                    expected=expected,
+                    stdout=stdout_val,
+                    stderr=stderr_val,
+                    timed_out=timed_out,
+                    exit_code=exit_code,
+                )
+            )
+
+        return ExecutionReport(compiled=True, compile_error=None, results=results)
+
+
+def run_against_test_cases(
+    language: str,
+    source_code: str,
+    test_cases: list[dict],
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    batch: bool = False,
+) -> ExecutionReport:
+    """Compiles `source_code` (if the language needs it) once, then runs it
+    against `test_cases` (`{"input": str, "expected_output": str}`), comparing
+    normalized stdout. When `batch=True`, all test cases execute inside a single
+    pooled container instead of spawning one container per test case."""
+    if batch:
+        return run_against_test_cases_batch(
+            language=language,
+            source_code=source_code,
+            test_cases=test_cases,
+            timeout_seconds=timeout_seconds,
+        )
+    key = _resolve_runner_language(language, source_code)
+    if key not in LANGUAGE_RUNNERS:
+        raise ValueError(f"Unsupported language {language!r}. Supported: {sorted(LANGUAGE_RUNNERS)}")
+    runner = LANGUAGE_RUNNERS[key]
+    image_error = ensure_language_image(key)
+    if image_error:
+        raise DockerNotAvailableError(image_error)
+
+    clean_code = _clean_source_code(source_code, key)
     with tempfile.TemporaryDirectory(prefix="klyra-run-") as tmp:
         workdir = Path(tmp)
         workdir.chmod(0o777)  # container may run as a non-root/different uid than this process
-        (workdir / runner.filename).write_text(source_code)
+        (workdir / runner.filename).write_text(clean_code)
 
         if runner.compile_cmd:
             compile_result = _docker_run(
@@ -385,6 +658,10 @@ class RunCodeInput(BaseModel):
     timeout_seconds: int = Field(
         default=DEFAULT_TIMEOUT_SECONDS, ge=1, le=30, description="Per-test-case execution timeout"
     )
+    batch: bool = Field(
+        default=False,
+        description="When true, compile and execute all test cases inside a single pooled Docker container.",
+    )
 
 
 class RunCodeTool(BaseTool):
@@ -408,8 +685,9 @@ class RunCodeTool(BaseTool):
         source_code: str,
         test_cases: list,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        batch: bool = False,
     ) -> str:
-        key = language.strip().lower()
+        key = _resolve_runner_language(language, source_code)
         if key not in LANGUAGE_RUNNERS:
             return f"Unsupported language {language!r}. Supported: {', '.join(sorted(LANGUAGE_RUNNERS))}"
         if not docker_available():
@@ -421,7 +699,12 @@ class RunCodeTool(BaseTool):
 
         normalized_cases = [tc if isinstance(tc, dict) else tc.model_dump() for tc in test_cases]
         try:
-            report = run_against_test_cases(key, source_code, normalized_cases, timeout_seconds)
+            if batch:
+                report = run_against_test_cases(
+                    key, source_code, normalized_cases, timeout_seconds, batch=True
+                )
+            else:
+                report = run_against_test_cases(key, source_code, normalized_cases, timeout_seconds)
         except DockerNotAvailableError as exc:
             return str(exc)
         except Exception as exc:  # noqa: BLE001 - must never crash the crew; surface the failure instead
@@ -436,11 +719,16 @@ class RunCodeTool(BaseTool):
                 lines.append(f"  [PASS] test case {result.index + 1}")
                 continue
             status = "TIMED OUT" if result.timed_out else f"exit_code={result.exit_code}"
-            lines.append(
+            fail_line = (
                 f"  [FAIL] test case {result.index + 1} ({status})\n"
                 f"    input: {result.stdin!r}\n"
                 f"    expected: {result.expected!r}\n"
                 f"    actual stdout: {result.stdout!r}\n"
                 f"    stderr: {result.stderr[-500:]!r}"
             )
+            if key == "bash" and "python3: command not found" in result.stderr:
+                fail_line += "\n    hint: python3 is not available in the bash runner. Write standard bash/grep/sed/awk code."
+            elif not result.stdout and result.expected and result.exit_code == 0:
+                fail_line += "\n    hint: Program produced empty stdout. Check if your filters/logic excluded all input lines, or if the expected output contradicts problem constraints."
+            lines.append(fail_line)
         return "\n".join(lines)

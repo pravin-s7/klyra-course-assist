@@ -17,19 +17,37 @@ parse_documents_task:
 
 index_syllabus_task:
   description: >
-    For subject "{subject}", you must build the syllabus index.
-    If categories_filter="{categories_filter}" is a specific string (not empty) and does NOT contain the word "week", you MUST skip this entire task completely because PYQs and transcripts do not contain syllabus concepts.
-    However, you MUST echo the exact summary output you received from the parse_documents_task so the user knows their files were ingested, followed by " (Skipped syllabus indexing because category was {categories_filter})."
-    Otherwise:
-    If week={week_filter} is a specific number (not None), you MUST ONLY index that specific week (skip steps 1-2 and just call fetch_parsed_chunks for that week).
-    If week={week_filter} is None, then:
-    Step 1: Call report_syllabus_gaps to get the exact list of missing weeks.
-    Step 2: Calculate the existing weeks (the ones between 1-12 that are NOT in the missing list).
-    Step 3: For EVERY single existing week, you MUST call fetch_parsed_chunks(subject, week=X).
-    Step 4: Extract the concepts from the chunks and call write_syllabus_entries.
-    CRITICAL: Do NOT skip any existing week. For example, if weeks 1, 5, and 6 exist, you MUST make separate fetch_parsed_chunks calls for week 1, week 5, and week 6. Do not stop after week 1!
-    Include the result of report_syllabus_gaps verbatim in your final answer if it was called.
-    You MUST include the exact summary output you received from the parse_documents_task at the beginning of your final answer, so the user knows exactly what files were ingested across all categories (including pyq, transcripts, additional, and weeks).
+    For subject "{subject}", build the syllabus index.
+
+    **SKIP CONDITION:** If categories_filter="{categories_filter}" is a
+    specific string (not empty) and does NOT contain the word "week", you
+    MUST skip this entire task completely because PYQs and transcripts do
+    not contain syllabus concepts. However, you MUST echo the exact summary
+    output you received from the parse_documents_task so the user knows
+    their files were ingested, followed by " (Skipped syllabus indexing
+    because category was {categories_filter})."
+
+    **SINGLE-WEEK MODE:** If week={week_filter} is a specific number (not
+    None), call fetch_parsed_chunks ONLY for that specific week, extract
+    the concepts from the chunks, and call write_syllabus_entries. Skip
+    the gap report.
+
+    **ALL-WEEKS MODE:** If week={week_filter} is None, then:
+    1. Call report_syllabus_gaps to get the exact list of missing weeks.
+    2. Calculate the existing weeks (the ones between 1-12 that are NOT in
+       the missing list).
+    3. For EVERY single existing week, you MUST call
+       fetch_parsed_chunks(subject, week=X). For example, if weeks 1, 5,
+       and 6 exist, you MUST make separate fetch_parsed_chunks calls for
+       week 1, week 5, and week 6. Do not stop after week 1!
+    4. Extract the concepts from the chunks and call write_syllabus_entries.
+    Include the result of report_syllabus_gaps verbatim in your final
+    answer if it was called.
+
+    CRITICAL: You MUST include the exact summary output you received from
+    the parse_documents_task at the beginning of your final answer, so the
+    user knows exactly what files were ingested across all categories
+    (including pyq, transcripts, additional, and weeks).
   expected_output: >
     The exact parser summary from parse_documents_task, followed by a per-week concept count summary for "{subject}" and the explicit list of any missing/empty weeks (1-12) from report_syllabus_gaps.
   agent: syllabus_indexer

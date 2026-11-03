@@ -37,39 +37,9 @@ _DEFAULT_VOICE = "Puck"
 _RECONNECT_DELAY_SECONDS = 2
 _MAX_RECONNECT_ATTEMPTS = 5
 
-_SYSTEM_INSTRUCTION = """\
-You are Klyra, a friendly and professional voice assistant for academic \
-content generation. You help educators create question papers, coding \
-problems, teaching materials, and more through natural conversation.
+from klyra.core import SYSTEM_INSTRUCTION, VOICE_ADDENDUM
 
-Your capabilities (available as tools):
-• ingest — parse and index source documents for a subject
-• generate_question_paper — create a complete question paper with review and answer key
-• revise_question_paper — fix issues in a generated question paper
-• convert_documents — convert between Markdown and LaTeX
-• prepare_teaching_material — create session plans for live teaching
-• revise_teaching_material — revise teaching materials
-• fetch_transcript — download a YouTube video transcript
-• generate_coding_problems — create coding problems with validated test cases
-• revise_coding_problems — fix issues in generated coding problems
-
-CRITICAL GUARDRAILS (STAY IN CHARACTER):
-You are strictly an academic and teaching assistant. You MUST NOT engage in general chit-chat, discuss world news, give recipes, or answer questions completely unrelated to teaching, coding, question papers, or academic experience.
-If the user asks about out-of-domain topics (like cooking, daily news, or random facts), you MUST politely refuse and steer the conversation back to how you can help them with their teaching or academic workload. You MAY discuss ideas to improve teaching, coding, or academic experience if asked, but nothing outside of that scope.
-
-Conversation guidelines:
-1. When the user wants to perform an action, ask for required parameters \
-one or two at a time in natural conversation. Don't ask for all of them at once.
-2. For optional parameters, use sensible defaults unless the user mentions them.
-3. Before executing a tool, briefly confirm the key parameters with the user. Always use the exact folder name or identifier the user provides.
-4. After a tool completes, summarise the result conversationally.
-5. If a tool fails, explain the error in plain language and suggest fixes.
-6. Be concise — you are speaking, not writing. Keep responses short and natural.
-7. If the user's request is ambiguous, ask a clarifying question.
-8. English is your default language. If the user just says your name or a short/indistinct word, you MUST respond in English.
-9. You can understand and speak in any language requested by the user, but ONLY switch your spoken language if the user explicitly asks you to, or if they speak to you clearly in a foreign language in full sentences. Even then, you MUST NOT act as a language tutor or a general translator. You MUST keep the topic strictly focused on academic content generation and politely refuse general language-learning requests.
-10. If the user asks for a graph, diagram, or image, DO NOT claim that you cannot generate images. Your backend crews have LaTeX/TikZ tools that can generate diagrams automatically. You MUST respond affirmatively and use the appropriate 'revise' tool (e.g. revise_question_paper) to pass their request in the 'notes' parameter.
-"""
+_SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION + VOICE_ADDENDUM
 
 
 class VoiceOrchestrator:
@@ -230,7 +200,7 @@ class VoiceOrchestrator:
                         _MAX_RECONNECT_ATTEMPTS,
                     )
                     print(
-                        f"\n  ⟳  Session ended. Reconnecting "
+                        f"\n  ⟳  Session ended ({exc}). Reconnecting "
                         f"({attempt}/{_MAX_RECONNECT_ATTEMPTS})...\n"
                     )
                     
@@ -247,8 +217,10 @@ class VoiceOrchestrator:
                     except Exception:
                         pass
                 else:
-                    # Clean session end (shouldn't normally happen)
-                    break
+                    # Clean session end - we should just reconnect and keep listening
+                    print("\n  ⟳  Session closed by server. Reconnecting...\n")
+                    await asyncio.sleep(_RECONNECT_DELAY_SECONDS)
+                    continue
         except KeyboardInterrupt:
             import logging
             logging.getLogger("asyncio").setLevel(logging.CRITICAL)
@@ -275,8 +247,9 @@ class VoiceOrchestrator:
         ) as session:
             self._session = session
             logger.info("Gemini Live session connected")
+            print("  ✓  Connected. Listening...\n", flush=True)
 
-            # Three concurrent tasks
+            # Two concurrent tasks
             input_task = asyncio.create_task(
                 self._stream_input(session), name="voice-input"
             )
@@ -288,7 +261,7 @@ class VoiceOrchestrator:
                 # Wait until any task finishes (error or session end)
                 done, pending = await asyncio.wait(
                     [input_task, output_task],
-                    return_when=asyncio.FIRST_EXCEPTION,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
 
                 # Cancel remaining tasks
@@ -342,17 +315,23 @@ class VoiceOrchestrator:
                         audio={"data": chunk, "mime_type": "audio/pcm;rate=16000"}
                     )
             except asyncio.CancelledError:
-                raise
+                break
             except Exception as exc:
+                if self._shutdown_event.is_set():
+                    return
+                if "1000" in str(exc) or "ConnectionClosedOK" in type(exc).__name__:
+                    return
                 logger.debug("Input stream error: %s", exc)
                 raise
 
     async def _stream_output(self, session) -> None:
         """Receive responses from Gemini — audio playback + tool handling."""
         agent_speaking = False
-        while not self._shutdown_event.is_set():
-            try:
+        try:
+            while not self._shutdown_event.is_set():
+                had_responses = False
                 async for response in session.receive():
+                    had_responses = True
                     # 1. Handle tool calls
                     if (
                         response.tool_call is not None
@@ -405,6 +384,15 @@ class VoiceOrchestrator:
                                     print(f"{part.text}", end="", flush=True)
                                     self._current_model_response += part.text
                         
+                        # Handle barge-in interruption
+                        if response.server_content.interrupted:
+                            if self._current_model_response:
+                                self._chat_history.append(("model", self._current_model_response))
+                                self._current_model_response = ""
+                            if agent_speaking:
+                                print("\033[0m\n", end="", flush=True)
+                                agent_speaking = False
+
                         if response.server_content.turn_complete:
                             if self._current_model_response:
                                 self._chat_history.append(("model", self._current_model_response))
@@ -413,11 +401,19 @@ class VoiceOrchestrator:
                                 print("\033[0m\n", end="", flush=True)
                                 agent_speaking = False
 
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.debug("Output stream error: %s", exc)
-                raise
+                if not had_responses:
+                    # Clean session end / EOF from server
+                    break
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            if self._shutdown_event.is_set():
+                return
+            if "1000" in str(exc) or "ConnectionClosedOK" in type(exc).__name__:
+                return
+            logger.debug("Output stream error: %s", exc)
+            raise
 
     # ── Tool call handling ──────────────────────────────────────────
 
