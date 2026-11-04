@@ -1,61 +1,82 @@
-"""Independent utility: convert generated documents between Markdown and LaTeX."""
+"""Format conversion service with deterministic Pandoc/Exam fast-path and LLM fallback."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
-def _try_direct_md_to_latex(subject: str, request: str) -> str | None:
-    """If `request` explicitly asks to convert a `.md` file in `docs/<subject>/generated/`
-    to LaTeX/Overleaf/Exam `.tex`, run `ConvertMarkdownToLatexTool` deterministically."""
-    import re
-    from klyra.tools.format_conversion import ConvertMarkdownToLatexTool
+def _try_direct_conversion(subject: str, request: str) -> str | None:
+    """Attempt deterministic zero-token conversion when `request` targets on-disk
+    `.md` -> `.tex` or `.tex` -> `.md` (without unrendered TikZ blocks)."""
+    from klyra.tools.format_conversion import (
+        ConvertLatexToMarkdownTool,
+        ConvertMarkdownToLatexTool,
+    )
     from klyra.utils import fs
 
     req_low = (request or "").lower()
-    if not any(k in req_low for k in ("latex", ".tex", "overleaf", "exam")):
-        return None
-    if "markdown" in req_low and any(req_low.find(k) < req_low.find("markdown") for k in ("latex", ".tex")):
-        # Converting FROM latex TO markdown -> let crew handle TikZ recovery
-        return None
-
     gen_dir = fs.generated_dir(subject)
     if not gen_dir.exists():
         return None
 
-    # Find explicit `.md` filenames mentioned in the request
+    # Case 1: Explicit `.tex` -> `.md` conversion when no TikZ blocks need LLM recovery
+    tex_matches = re.findall(r"([A-Za-z0-9_.-]+\.tex)\b", request)
+    if tex_matches and ("markdown" in req_low or ".md" in req_low):
+        valid_tex: list[str] = []
+        for tname in tex_matches:
+            tpath = gen_dir / tname
+            if not tpath.exists():
+                return None
+            raw_tex = tpath.read_text(encoding="utf-8", errors="ignore")
+            if "\\begin{tikzpicture}" in raw_tex:
+                return None
+            valid_tex.append(tname)
+        if valid_tex:
+            tool_l2m = ConvertLatexToMarkdownTool()
+            return "\n\n".join(
+                tool_l2m._run(subject=subject, source_filename=fname)
+                for fname in dict.fromkeys(valid_tex)
+            )
+
+    # Case 2: `.md` -> `.tex` (LaTeX / Overleaf / Exam) conversion
+    if not any(k in req_low for k in ("latex", ".tex", "overleaf", "exam")):
+        return None
+    if "markdown" in req_low and any(
+        req_low.find(k) < req_low.find("markdown") for k in ("latex", ".tex") if k in req_low
+    ):
+        return None
+
     md_matches = re.findall(r"([A-Za-z0-9_.-]+\.md)\b", request)
-    candidates: list[str] = []
-    for m in md_matches:
-        if (gen_dir / m).exists():
-            candidates.append(m)
-
+    candidates: list[str] = [m for m in md_matches if (gen_dir / m).exists()]
     if not candidates:
-        # Check if a base QP name (e.g. `endterm-qp` or `endterm`) was mentioned
         for p in sorted(gen_dir.glob("*-qp*.md")):
-            stem = p.stem.lower()
-            if stem in req_low:
+            if p.stem.lower() in req_low:
                 candidates.append(p.name)
-
     if not candidates:
         return None
 
-    tool = ConvertMarkdownToLatexTool()
-    outputs = [tool._run(subject=subject, source_filename=fname) for fname in dict.fromkeys(candidates)]
+    tool_m2l = ConvertMarkdownToLatexTool()
+    outputs = [
+        tool_m2l._run(subject=subject, source_filename=fname)
+        for fname in dict.fromkeys(candidates)
+    ]
     return "\n\n".join(outputs)
 
 
+# Backward-compatible alias
+_try_direct_md_to_latex = _try_direct_conversion
+
+
 def run_conversion(subject: str, request: str) -> Any:
-    import os
-
-    os.environ["CREWAI_STORAGE_DIR"] = f".db/{subject}"
-
-    from klyra.crews.format_converter_crew.format_converter_crew import FormatConverterCrew
+    from klyra.crews.format_converter_crew.format_converter_crew import (
+        FormatConverterCrew,
+    )
     from klyra.services.skill_service import build_skill_prompt_inputs
     from klyra.utils import fs
 
     fs.check_subject_exists(subject)
 
-    direct_result = _try_direct_md_to_latex(subject, request)
+    direct_result = _try_direct_conversion(subject, request)
     if direct_result is not None:
         return direct_result
 
@@ -64,4 +85,5 @@ def run_conversion(subject: str, request: str) -> Any:
         "conversion_request": request,
         **build_skill_prompt_inputs(subject),
     }
-    return FormatConverterCrew().crew().kickoff(inputs=inputs)
+    with fs.crewai_storage_context(f".db/{subject}"):
+        return FormatConverterCrew().crew().kickoff(inputs=inputs)

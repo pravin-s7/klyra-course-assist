@@ -1,498 +1,420 @@
-# Klyra
+<div align="center">
 
-Klyra is a multi-agent AI system built on CrewAI that automates course preparation — parsing course materials to generate highly structured question papers, coding problems, and teaching materials. It offers three interfaces: a **local CLI**, an **HTTP API** (FastAPI + Celery), and a **conversational voice CLI** powered by the Gemini Live API.
+# 🎓 Klyra
 
-## Architecture Overview
+**Multi-Agent Academic Content Generation, Automated Code Verification & Conversational Teaching Studio**
 
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          ENTRY POINTS                                   │
-│                                                                         │
-│   klyra <cmd>            klyra serve             klyra voice            │
-│   (CLI — sync)           (HTTP API — async)       (Voice — real-time)   │
-│       │                      │                        │                 │
-│       │                      ▼                        ▼                 │
-│       │               ┌─────────────┐          ┌──────────────┐         │
-│       │               │  FastAPI    │          │ Voice        │         │
-│       │               │  Server    │          │ Orchestrator │         │
-│       │               │  + CORS    │          │              │         │
-│       │               │  + Auth    │          │ ┌──────────┐ │         │
-│       │               │  + Rate    │          │ │ PyAudio  │ │         │
-│       │               │    Limit   │          │ │Transport │ │         │
-│       │               └─────┬──────┘          │ └──────────┘ │         │
-│       │                     │                 │ ┌──────────┐ │         │
-│       │                     ▼                 │ │ Gemini   │ │         │
-│       │               ┌──────────┐            │ │ Live WS  │ │         │
-│       │               │ Job Store│            │ └────┬─────┘ │         │
-│       │               │ (SQLite/ │            │      │       │         │
-│       │               │  Postgres)│           │  Tool Calls  │         │
-│       │               └─────┬────┘            └──────┼───────┘         │
-│       │                     ▼                        │                 │
-│       │               ┌──────────┐                   │                 │
-│       │               │ Celery   │                   │                 │
-│       │               │ Worker   │                   │                 │
-│       │               │ (Redis)  │                   │                 │
-│       │               └─────┬────┘                   │                 │
-│       │                     │                        │                 │
-│       └─────────────────────┼────────────────────────┘                 │
-│                             ▼                                           │
-├─────────────────────────────────────────────────────────────────────────┤
-│                        SERVICE LAYER                                     │
-│                   (klyra/services/*.py)                                   │
-│                                                                         │
-│  ┌──────────┐ ┌───────────┐ ┌─────────┐ ┌──────────┐ ┌─────────────┐  │
-│  │ Ingest   │ │ Generate  │ │ Revise  │ │ Teach    │ │ Code        │  │
-│  │ Service  │ │ Service   │ │ Service │ │ Service  │ │ Service     │  │
-│  └────┬─────┘ └─────┬─────┘ └────┬────┘ └────┬─────┘ └──────┬──────┘  │
-│       │             │            │           │              │          │
-│  + Convert Service  │  + Revise-Teach Service  │  + Revise-Code      │
-│  + Transcript Svc   │  + Delete-Index          │                      │
-│                     │                          │                      │
-├─────────────────────┼──────────────────────────┼──────────────────────┤
-│                     ▼                          ▼                      │
-│                    CREWAI MULTI-AGENT SYSTEM                          │
-│                                                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │  Generation Crew          │  Coding Problem Crew               │  │
-│  │                           │                                    │  │
-│  │  QP Creator ──────┐       │  Problem Writer ──────┐            │  │
-│  │                   ▼       │                       ▼            │  │
-│  │  Discrepancy ◄── (QP) ──►│  Code Validator ◄── (Problems) ──►│  │
-│  │  Reviewer   ║             │  (runs in Docker) ║               │  │
-│  │             ║  Solver &   │                   ║  Discrepancy  │  │
-│  │             ╚══ Verifier  │                   ╚══ Reviewer    │  │
-│  │                   │       │                       │            │  │
-│  │             ┌─────┘       │                 ┌─────┘            │  │
-│  │             ▼             │                 ▼                  │  │
-│  │  Finalizer (merges both)  │  Finalizer (merges both)          │  │
-│  └───────────────────────────┴────────────────────────────────────┘  │
-│                                                                       │
-│  + Ingestion Crew        + Teaching Material Crew                    │
-│  + Revision Crew         + Teaching Revision Crew                    │
-│  + Coding Revision Crew  + Format Converter Crew                     │
-│                                                                       │
-├───────────────────────────────────────────────────────────────────────┤
-│                         TOOL LAYER                                     │
-│                                                                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                │
-│  │ RAG Tools    │  │ Parsing      │  │ Execution    │                │
-│  │              │  │ Tools        │  │ Tools        │                │
-│  │ • Syllabus   │  │              │  │              │                │
-│  │   Search     │  │ • Document   │  │ • Code       │                │
-│  │ • PYQ Search │  │   Parser     │  │   Executor   │                │
-│  │ • PYQ Chunks │  │   (Gemini    │  │   (Docker    │                │
-│  │ • Image      │  │    multimodal│  │    sandbox)  │                │
-│  │   Search     │  │    PDF/PPT)  │  │              │                │
-│  │ • Source     │  │ • YouTube    │  │ • Format     │                │
-│  │   Files List │  │   Transcript │  │   Converter  │                │
-│  │ • LeetCode   │  │ • Image      │  │   (Pandoc)   │                │
-│  │   Search     │  │   Extraction │  │              │                │
-│  │ • Coding     │  │              │  │ • LaTeX      │                │
-│  │   Source     │  │              │  │   Diagrams   │                │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                │
-│         │                 │                 │                         │
-├─────────┼─────────────────┼─────────────────┼─────────────────────────┤
-│         ▼                 ▼                 ▼                         │
-│                       STORAGE LAYER                                   │
-│                                                                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                │
-│  │ Qdrant       │  │ Gemini LLM   │  │ Filesystem   │                │
-│  │ Vector Store │  │ (via LiteLLM)│  │              │                │
-│  │              │  │              │  │ docs/<subj>/ │                │
-│  │ Collections: │  │ Default:     │  │  week_1-12/  │                │
-│  │ • <subj>-    │  │ gemini-3.1-  │  │  additional/ │                │
-│  │   syllabus   │  │ flash-lite   │  │  pyq/        │                │
-│  │ • <subj>-pyq │  │              │  │  transcripts/│                │
-│  │ • <subj>-    │  │ Embeddings:  │  │  generated/  │                │
-│  │   parsed     │  │ gemini-      │  │   ├─ *.md    │                │
-│  │ • <subj>-    │  │ embedding-2  │  │   └─ coding/ │                │
-│  │   images     │  │              │  │              │                │
-│  └──────────────┘  └──────────────┘  └──────────────┘                │
-│                                                                       │
-│  + SQLite / PostgreSQL (Job Store)                                    │
-│  + Redis (Celery broker & result backend)                            │
-│  + Docker (sandboxed code execution)                                  │
-└───────────────────────────────────────────────────────────────────────┘
-```
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![CrewAI](https://img.shields.io/badge/Multi--Agent-CrewAI-FF5A5F)](https://www.crewai.com/)
+[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Gemini API](https://img.shields.io/badge/AI-Gemini%20Live%20%26%20Vision-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
+[![Qdrant](https://img.shields.io/badge/Vector%20DB-Qdrant-DC244C)](https://qdrant.tech/)
+[![Docker Sandbox](https://img.shields.io/badge/Sandbox-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
-### Layer-by-Layer Breakdown
+[Features](#-key-features) •
+[Architecture](#-architecture) •
+[Project Structure](#-project-structure) •
+[Quickstart](#-quickstart) •
+[CLI Reference](#-cli-reference) •
+[Web Studio & API](#-web-studio--rest-api) •
+[Configuration](#️-configuration--environment-variables) •
+[Testing](#-testing) •
+[Contributing](#-contributing)
 
-#### 1. Entry Points
+</div>
 
-Klyra has three interfaces that **all converge on the same service layer** — no logic duplication.
+---
 
-| Entry Point | How it works | When to use |
-|---|---|---|
-| **`klyra <cmd>`** (CLI) | Calls `services/*.py` directly, blocks until done | Local dev, scripting, one-off tasks |
-| **`klyra serve`** (HTTP API) | FastAPI receives request → creates Job record → dispatches to Celery → returns `202 Accepted` immediately. Celery worker picks up the task and calls `services/*.py` in the background. Client polls `/api/v1/jobs/{id}` for status. | Production deployment, frontend integration |
-| **`klyra voice`** (Voice CLI) | Opens a bidirectional WebSocket to Gemini Live API. User speaks → Gemini asks follow-up questions → gathers parameters → emits `function_call` → `ToolExecutor` calls `services/*.py` → result sent back to Gemini for verbal summary. | Hands-free use, faster than memorising CLI flags |
+## 📖 Overview
 
-#### 2. Service Layer (`klyra/services/`)
+**Klyra** is an open-source, multi-agent AI platform built on **CrewAI**, **Google Gemini**, **FastAPI**, and **Qdrant** that automates academic course preparation for university educators and teaching assistants.
 
-The **single source of truth** for business logic. Every entry point calls these functions — they never talk to crews directly.
+By ingesting lecture slides, syllabi, transcripts, and past-year question papers (PYQs), Klyra generates syllabus-grounded **question papers**, **Docker-verified coding problem sets**, **self-healing LaTeX/TikZ diagrams**, and **live teaching session plans**—accessible through a unified **Web Studio**, **Gemini Live Voice Assistant**, **Interactive Terminal Chat**, **Local CLI**, and **Async REST API**.
 
-| Service | What it does |
-|---|---|
-| `ingestion_service` | Parses docs (PDF, PPT, DOCX, Markdown) via Gemini multimodal, indexes into Qdrant |
-| `generation_service` | Creates question papers — validates inputs, builds crew parameters, kicks off `GenerationCrew` |
-| `revision_service` | Revises generated QPs using their own review + answer key |
-| `coding_problem_service` | Generates coding problems with Docker-validated test cases |
-| `teaching_material_service` | Prepares/revises structured teaching session plans |
-| `conversion_service` | Converts between Markdown ↔ LaTeX via an agent with Pandoc |
-| `transcript_service` | Downloads YouTube transcripts for ingestion |
-| `job_store` | Persistent job tracking (SQLite or PostgreSQL) for the async API |
+---
 
-#### 3. CrewAI Multi-Agent System (`klyra/crews/`)
+## Key Features
 
-Each service delegates to a **crew** — a team of AI agents with specialised roles. Agents run sequentially or in parallel depending on the workflow.
+- **Multi-Agent Question Paper Generation & Revision**
+  - Orchestrates a 4-stage CrewAI pipeline: **QP Creator** → parallel **Discrepancy Reviewer** & independent **Solver/Verifier** → **Finalizer**.
+  - Enforces strict Pydantic schemas, mark distribution guardrails, option-count checks, and syllabus/PYQ grounding.
+  - Persists dual structured outputs (`.json` + `.md`) and converts deterministically to **Overleaf-ready LaTeX (`.tex`)**, **PDF**, or **Word (`.docx`)**.
+- **Sandboxed Coding Problem Generation & Verification**
+  - Creates complete coding problem packages (`README.md`, reference `solution.*`, `evaluation_script.*`, and public/private test suites).
+  - Independently compiles and executes reference solutions against all generated test cases inside **network-disabled Docker containers** (`--network none`, memory/CPU/PID capped).
+  - Supports **Python**, **C**, **C++**, **Java**, **Bash/Awk/Sed**, **SQL (SQLite)**, **PostgreSQL**, and **Python + Database** tracks.
+- **Self-Healing LaTeX/TikZ Diagram Engine**
+  - Automatically renders graphs, trees, automata, ER diagrams, and circuits via `pdflatex` → PNG/SVG.
+  - Runs a **two-layer quality gate**: deterministic 2D geometric collision/clipping detection followed by **Gemini Vision** semantic verification (checking arrow visibility, edge labels, and course notation fidelity) with automatic self-repair loops.
+- **🎙️ Four Unified Interfaces (Single-Source Tool Registry)**
+  - **Web Studio (`klyra web`)**: Dark-mode chat & real-time voice UI with inline Markdown/MathJax rendering, interactive diagram lightbox, live streaming agent logs, one-click `.zip` bundle downloads, RBAC (`admin` / `instructor`), and Google OAuth 2.0.
+  - **Voice Assistant (`klyra voice`)**: Hands-free, real-time bidirectional voice conversation powered by the **Gemini Live API**.
+  - **Terminal Chat (`klyra chat`)**: Interactive conversational CLI with tool execution.
+  - **CLI & REST API (`klyra <cmd>` / `/api/v1/*`)**: Direct synchronous CLI commands and Celery-backed asynchronous HTTP endpoints.
+- **🧭 Per-Subject `skill.md` Profiles**
+  - Each course (`docs/<subject>/skill.md`) declaratively configures notation rules, allowed programming languages, evaluation templates, and pedagogical style.
 
-**Generation Crew** (question paper creation):
+---
+
+## 🏗️ Architecture
 
 ```text
-QP Creator Agent
-    │  (generates the paper using RAG tools + syllabus search)
-    ▼
-┌───────────────────────┬──────────────────────┐
-│ Discrepancy Reviewer  │  Solver & Verifier   │  ← run in PARALLEL
-│ (checks accuracy,     │  (independently      │
-│  syllabus coverage,   │   solves every Q,    │
-│  ambiguity, overlap)  │   verifies answers)  │
-└───────────┬───────────┴──────────┬───────────┘
-            └──────────┬───────────┘
-                       ▼
-              Finalizer Agent
-              (cross-checks both reviews, produces final summary)
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                                 ENTRY POINTS                                  │
+│                                                                               │
+│   klyra web                klyra voice / chat         klyra <cmd>             │
+│   (FastAPI Web Studio      (Gemini Live Audio &       (Synchronous CLI &      │
+│    + /api/v1 REST API)      Terminal Chat Loops)       Scripting Interface)   │
+│            │                         │                          │             │
+│            └─────────────────────────┼──────────────────────────┘             │
+│                                      ▼                                        │
+├───────────────────────────────────────────────────────────────────────────────┤
+│                   SINGLE-SOURCE TOOL REGISTRY & SERVICES                      │
+│             (klyra/voice/tool_registry.py  •  klyra/services/*.py)            │
+│                                                                               │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────────────┐  │
+│  │ Ingestion    │ │ Generation & │ │ Coding       │ │ Teaching, Conversion │  │
+│  │ Service      │ │ Revision Svc │ │ Problem Svc  │ │ & Transcript Svcs    │  │
+│  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────────┬───────────┘  │
+│         │                │                │                    │              │
+├─────────┼────────────────┼────────────────┼────────────────────┼──────────────┤
+│         ▼                ▼                ▼                    ▼              │
+│                     CONSOLIDATED DOMAIN CREWS (CrewAI)                        │
+│                                                                               │
+│  ┌────────────────────────────────────┬────────────────────────────────────┐  │
+│  │ ExamCrew (generate + revise)       │ CodingCrew (generate + revise)     │  │
+│  │                                    │                                    │  │
+│  │   QP Creator ────────┐             │   Problem Writer ────────┐         │  │
+│  │                      ▼             │                          ▼         │  │
+│  │   Discrepancy ◄─── (QP) ───► Solver│   Docker Sandbox ◄── (Problems)    │  │
+│  │   Reviewer     ║            Verifier│   Code Validator  ║    Discrepancy│  │
+│  │                ╚═════╦═══════╝     │                    ╚═════╦═════════│  │
+│  │                      ▼             │                          ▼         │  │
+│  │              Finalizer Agent       │                  Finalizer Agent   │  │
+│  └────────────────────────────────────┴────────────────────────────────────┘  │
+│  + TeachingCrew (prepare + revise)    + IngestionCrew (parse + index)         │
+│                                                                               │
+├───────────────────────────────────────────────────────────────────────────────┤
+│                        TOOLS, DIAGRAMS & STORAGE LAYER                        │
+│                                                                               │
+│  • Vector Store (Qdrant / Chroma) + Gemini Embedding 2                        │
+│  • Diagram Engine (klyra/diagrams/: compiler.py + verifier.py + tool.py)      │
+│  • Docker Code Sandbox (klyra/tools/code_execution_tool.py + templates/eval/) │
+│  • Format Renderer & Guardrails (dual .json + .md persistence, Pandoc/LaTeX)  │
+│  • SQLAlchemy Storage (PostgreSQL / SQLite: Users, Sessions, File Ownership)  │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Coding Problem Crew**: Same pattern, but the Validator Agent actually **compiles and runs** reference solutions against generated test cases inside a network-disabled Docker container (Python, Java, C, C++, Bash).
+---
 
-#### 4. Tool Layer (`klyra/tools/`)
-
-Agents use these tools to interact with the outside world:
-
-| Tool | Purpose |
-|---|---|
-| `SyllabusSearchTool` | Semantic search over indexed syllabus content (Qdrant) |
-| `PyqSearchTool` | Semantic search over past-year questions (Qdrant) |
-| `FetchPyqChunksTool` | Retrieve full PYQ content by metadata |
-| `SearchImagesTool` | Find extracted diagrams from source documents |
-| `ListSourceFilesTool` | List available source files for a subject |
-| `LeetCodeSearchTool` | Find related LeetCode problems for coding sets |
-| `CodingSourceTool` | Search coding-relevant content |
-| `DocumentParserTool` | Gemini multimodal parsing (PDF, slides → structured text) |
-| `YouTubeTranscriptTool` | Download video transcripts |
-| `ImageExtractionTool` | Extract diagrams from PDFs |
-| `CodeExecutionTool` | Run code in sandboxed Docker containers |
-| `FormatConversionTool` | Markdown ↔ LaTeX via Pandoc |
-| `GenerateDiagramTool` | Generate LaTeX/TikZ diagrams |
-
-#### 5. Storage Layer
-
-| Store | Technology | What it holds |
-|---|---|---|
-| **Vector Store** | Qdrant | 4 collections per subject: `syllabus`, `pyq`, `parsed`, `images` |
-| **LLM** | Gemini (via LiteLLM) | Default: `gemini-3.1-flash-lite` (configurable via `KLYRA_LLM_MODEL`) |
-| **Embeddings** | Gemini Embedding | `gemini-embedding-2` (or OpenAI `text-embedding-3-small`) |
-| **Job Store** | SQLite / PostgreSQL | Job records: status, result, error, timestamps |
-| **Users & RBAC** | SQLite / PostgreSQL | `users` (role, assigned courses), `chat_sessions` (owner, history), `file_ownership` (generated-file owners) — shared `DATABASE_URL`, local SQLite at `KLYRA_DB` |
-| **Chat Sessions** | `.db` (JSON) / PostgreSQL | Local chat history is stored in lightweight `.db/sessions/` JSON files. In production, this shifts to PostgreSQL to handle concurrent users (see SaaS section). |
-| **Queue** | Redis | Celery broker + result backend (API mode only) |
-| **Filesystem** | `docs/<subject>/` | Source materials (`week_1/`–`week_12/`, `pyq/`, `additional/`) and generated outputs (`generated/`) |
-| **Code Sandbox** | Docker | Network-disabled containers for code validation |
-
-### Voice Architecture
-
-```text
-klyra voice
-    │
-    ├─ AudioTransport (abstract interface)
-    │   └─ PyAudioTransport (CLI — mic/speaker via PortAudio)
-    │       ├─ Mic input:     16 kHz, 16-bit PCM, mono
-    │       └─ Speaker output: 24 kHz, 16-bit PCM, mono
-    │
-    ├─ VoiceOrchestrator (transport-agnostic core)
-    │   ├─ google-genai SDK → client.aio.live.connect() [WebSocket]
-    │   ├─ System instruction with Klyra persona
-    │   ├─ 10 function declarations (all CLI features)
-    │   ├─ 3 concurrent async tasks:
-    │   │   ├─ _stream_input()  — mic → Gemini
-    │   │   ├─ _stream_output() — Gemini → speaker
-    │   │   └─ _handle_tools()  — function calls → service layer
-    │   └─ Auto-reconnect on session timeout (~10-15 min)
-    │
-    └─ ToolExecutor
-        ├─ Receives function_call from Gemini
-        ├─ Runs in asyncio.to_thread() (CrewAI is synchronous)
-        └─ Returns result for Gemini to summarise verbally
-```
-
-The transport abstraction means the same orchestrator can later be plugged into a WebSocket or LiveKit transport for a web UI — no changes to tool logic or session management needed.
-
-### Project Structure
+## 📂 Project Structure
 
 ```text
 src/klyra/
-├── cli.py                    # CLI entry point (argparse, 11 subcommands)
-├── celery_app.py             # Celery configuration
-├── worker.py                 # Celery task definitions
-├── llm_config.py             # LLM + embedder factory
-├── api/
-│   ├── main.py               # FastAPI app (CORS, auth, rate limiting)
-│   ├── dependencies.py       # API key auth + rate limiter
-│   └── routes/               # 9 route modules (one per feature)
-├── services/
-│   ├── ingestion_service.py
-│   ├── generation_service.py
-│   ├── revision_service.py
-│   ├── coding_problem_service.py
-│   ├── teaching_material_service.py
-│   ├── conversion_service.py
-│   ├── transcript_service.py
-│   ├── job_store.py          # Persistent job tracking (SQLAlchemy)
-│   └── results_service.py
-├── crews/
-│   ├── generation_crew/      # QP creation (4 agents, parallel review)
-│   ├── revision_crew/        # QP revision
-│   ├── coding_problem_crew/  # Coding problems (Docker-validated)
-│   ├── coding_revision_crew/ # Coding revision
-│   ├── ingestion_crew/       # Document parsing + indexing
-│   ├── teaching_material_crew/
-│   ├── teaching_revision_crew/
-│   └── format_converter_crew/
-├── tools/                    # 13 agent tools (RAG, parsing, execution)
-├── models/                   # Pydantic request/response models
-├── utils/
-│   ├── fs.py                 # Filesystem conventions + validation
-│   └── parsing.py            # CLI argument parsing utilities
-└── voice/
-    ├── orchestrator.py       # Gemini Live session manager
-    ├── transport.py          # Abstract transport + PyAudio impl
-    ├── tool_declarations.py  # Function schemas (all 10 features)
-    └── tool_executor.py      # Function call → service dispatch
+├── cli.py                        # Unified CLI entrypoint (ingest, generate, code, teach, web, voice, chat, ...)
+├── celery_app.py                 # Celery broker & backend configuration
+├── worker.py                     # Background Celery worker tasks for /api/v1/*
+├── core/                         # Shared system prompt, LLM factory, subject skill.md loader
+├── models/                       # Pydantic schemas (QuestionPaper, CodingProblemSet, TeachingPlan, API responses)
+├── services/                     # Explicit business logic layer
+│   ├── ingestion_service.py      # Multimodal document parsing & vector indexing
+│   ├── generation_service.py     # Question paper generation
+│   ├── revision_service.py       # Question paper revision
+│   ├── coding_problem_service.py # Sandboxed coding problem generation & revision
+│   ├── teaching_material_service.py # Live session teaching material generation & revision
+│   ├── conversion_service.py     # Deterministic Markdown ↔ LaTeX/PDF/DOCX conversion + LLM fallback
+│   ├── transcript_service.py     # YouTube lecture transcript downloader
+│   └── job_store.py              # Async job state store
+├── crews/                        # Consolidated CrewAI domain crews
+│   ├── exam_crew.py              # ExamCrew (question paper generation & revision)
+│   ├── coding_crew.py            # CodingCrew (coding problem generation & revision)
+│   ├── teaching_crew.py          # TeachingCrew (teaching material generation & revision)
+│   ├── ingestion_crew/           # Document parsing & Qdrant indexing crew
+│   └── base_task.py              # KlyraTask with dual .json + .md output persistence
+├── diagrams/                     # Self-healing LaTeX/TikZ diagram subsystem
+│   ├── compiler.py               # TikZ sanitization, pdflatex compilation, PNG/SVG conversion
+│   ├── verifier.py               # 2D geometric collision analysis + Gemini Vision semantic gate
+│   └── tool.py                   # CrewAI GenerateDiagramTool & standalone diagram generator
+├── templates/                    # Static evaluation scripts & LaTeX preambles
+│   ├── eval/                     # Runner scripts (eval_python.py, eval_bash.sh, eval_java.sh, eval_c_cpp.sh, eval_sql.sh, ...)
+│   └── latex/exam_preamble.tex   # Exam paper LaTeX preamble template
+├── tools/                        # Agent tools (vector_store, code_execution_tool, format_conversion, subject_fs_tool, ...)
+├── utils/                        # Guardrails & rendering utilities
+│   ├── task_guardrails.py        # CrewAI output validation callbacks
+│   ├── markdown_parsers.py       # Fallback Markdown-to-Pydantic structured parsers
+│   ├── coding_verifier.py        # Independent Docker test-suite verification & spec sync
+│   └── format_renderer.py        # Pydantic → Markdown renderer & save_dual_output()
+├── voice/                        # Gemini Live & Chat tool layer
+│   ├── tool_registry.py          # Single-source @register_tool definitions & Pydantic input schemas
+│   ├── tool_executor.py          # Async tool dispatcher with log streaming & RBAC checks
+│   ├── orchestrator.py           # Gemini Live bidirectional audio session manager
+│   └── transport.py              # Audio transport abstraction (PyAudio CLI transport)
+├── auth/                         # Cookie sessions, RBAC dependencies, password hashing, Google OAuth 2.0
+├── storage/                      # SQLAlchemy models & repository (Users, ChatSessions, FileOwnership)
+├── api/                          # REST /api/v1/* routers (mounted on klyra.web.server:app)
+└── web/                          # FastAPI Web Studio
+    ├── server.py                 # Unified FastAPI app entrypoint
+    ├── admin_routes.py           # User & course assignment administration
+    ├── routes/                   # Modular routes (files.py, sessions.py, ws_chat.py, ws_voice.py)
+    └── static/                   # Frontend UI (index.html, app.js, markdown.js, admin.js, style.css)
 ```
-
-## Setup & Execution Guide
-
-You can run Klyra either natively on your local machine, or inside Docker containers.
 
 ---
 
-### Option 1: Running with Docker (Recommended for Production)
+## Quickstart
 
-Docker Compose is the easiest way to spin up the entire cluster, complete with the API, background worker, Redis broker, PostgreSQL database, and Qdrant vector store.
+### Option 1: Docker Compose (Recommended for Full Stack)
 
-1. **Configure Environment**
-   Create a `.env` file in the root directory (you can copy `.env.example` if it exists) and fill in your API keys:
+Docker Compose starts the **Web Studio & REST API**, **Celery Worker**, **PostgreSQL**, **Redis**, and **Qdrant** vector database in one command.
+
+1. **Create your `.env` file**
+   ```bash
+   cp .env.example .env   # or create .env with the variables below
+   ```
+   Minimum required keys in `.env`:
    ```env
-   GEMINI_API_KEY=your-api-key
-   OPENAI_API_KEY=your-api-key # Optional, if you use OpenAI for embeddings
-   KLYRA_API_KEY=your-secret-auth-token
+   GEMINI_API_KEY=your-gemini-api-key
+   KLYRA_SESSION_SECRET=change-me-to-a-long-random-secret
+   KLYRA_ADMIN_PASSWORD=change-me-admin-password
    ```
 
-2. **Start the Cluster**
+2. **Build the coding sandbox images (optional, for coding problem verification)**
+   ```bash
+   docker build -f Dockerfile.sandbox-python-db -t klyra-sandbox-python-db:latest .
+   docker build -f Dockerfile.sandbox-postgres  -t klyra-sandbox-postgres:latest .
+   ```
+
+3. **Start the stack**
    ```bash
    docker compose up -d --build
    ```
-   This command pulls the necessary databases and builds the Python environments for the API and worker. 
-   
-   *(Note: The first time you run this, it will take several minutes to download heavy AI dependencies like `crewai` and `langchain`. Future builds are almost instant thanks to layer caching!)*
 
-3. **Access the Web UI & API**
-   Once running, you can access the full web interface at:
-   - http://localhost:8765
+4. **Open Klyra Web Studio**
+   - **Web UI (Chat + Voice + File Manager)**: [http://localhost:8765](http://localhost:8765)
+   - **Admin Dashboard**: [http://localhost:8765/admin](http://localhost:8765/admin)
+   - **OpenAPI / Swagger Docs**: [http://localhost:8765/docs](http://localhost:8765/docs)
 
-   You can also view the interactive API documentation at:
-   - http://localhost:8765/docs
-   
-4. **View Logs**
-   To see what the background AI workers are doing:
+---
+
+### Option 2: Local Development Setup
+
+1. **System Prerequisites**
+   - Python **3.10+**
+   - Docker (for Qdrant and sandboxed code verification)
+   - `texlive-latex-base`, `texlive-pictures`, `texlive-latex-extra`, `poppler-utils`, `pandoc` (for LaTeX diagram compilation & PDF/DOCX export)
+   - `portaudio19-dev` (optional, for `klyra voice` microphone/speaker I/O)
+
+2. **Start Qdrant (and optional Redis/Postgres)**
    ```bash
-   docker compose logs -f worker
+   docker run -d --name klyra-qdrant -p 6333:6333 qdrant/qdrant:latest
+   ```
+
+3. **Create a virtual environment & install Klyra**
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -e ".[dev,voice]"
+   ```
+
+4. **Launch Klyra**
+   ```bash
+   # Launch the Web Studio at http://127.0.0.1:8765
+   klyra web
+
+   # Or start an interactive terminal chat session
+   klyra chat
+
+   # Or start a hands-free Gemini Live voice session
+   klyra voice
    ```
 
 ---
 
-### Option 2: Running Locally (Without Docker)
+## CLI Reference
 
-If you prefer to run the Python processes directly on your host machine (great for active development), you can run Klyra natively. **You still need Redis, Postgres, and Qdrant running somewhere (or via Docker) for the backend to function fully.**
+Klyra provides a full suite of synchronous CLI commands via `klyra <subcommand>`:
 
-1. **Start the backing services**
-   Even without dockerizing the Python app, you should start the databases:
-   ```bash
-   docker run -d -p 6379:6379 redis:7-alpine
-   docker run -d -p 6333:6333 qdrant/qdrant:latest
-   docker run -d -p 5432:5432 -e POSTGRES_USER=klyra -e POSTGRES_PASSWORD=klyrapass -e POSTGRES_DB=klyradb postgres:15-alpine
-   ```
-
-2. **Install Python Dependencies**
-   Ensure you have Python 3.10 or 3.11 installed. Create a virtual environment and install the package:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -e .
-   ```
-
-3. **Run the FastAPI Server**
-   In your first terminal window, start the API:
-   ```bash
-   klyra serve
-   # or
-   uvicorn klyra.api.main:app --host 127.0.0.1 --port 8000 --reload
-   ```
-
-4. **Run the Celery Worker**
-   In a *second* terminal window, start the background worker that actually executes the AI tasks:
-   ```bash
-   source .venv/bin/activate
-   celery -A klyra.celery_app worker --loglevel=info
-   ```
-
-## Local CLI
-
-Klyra comes with a rich local CLI (`klyra`). You can use this to execute tasks synchronously without starting the API server!
-
+### 1. Ingest & Manage Course Materials
 ```bash
-# Ingest course materials
-klyra ingest --subject python-basics --week 1
+# Ingest all lecture materials for a subject
+klyra ingest --subject dbms
 
-# Generate a question paper synchronously
-klyra generate --subject python-basics --qp-name midterm \
-    --scope "week_1-week_4" --difficulty medium --type-counts "MCQ:5,MSQ:3,NAT:2"
+# Ingest a specific week along with PYQs and transcripts
+klyra ingest --subject ct --week 3 --pyq --transcript
 
-# Generate coding problems
-klyra code --subject python-basics --name lab-3 --language python \
-    --scope week_3 --difficulty medium --num-questions 5 \
-    --public-tests 3 --private-tests 5
+# Ingest a single file or force re-parse
+klyra ingest --subject python --file docs/python/week_1/lecture1.pdf --force
 
-# Prepare teaching material
-klyra teach --subject python-basics --session-name week-4-live \
-    --scope week_4 --notes "45 min, focus on intuition"
-
-# Delete accidentally ingested files from Qdrant
-klyra delete-index --subject python-basics \
-    --source-file "/absolute/path/to/docs/python-basics/week_1/bad_file.pdf"
+# Remove a specific file from the vector index
+klyra delete-index --subject python --source-file docs/python/week_1/old.pdf
 ```
 
-## Voice CLI
-
-Klyra includes a conversational voice interface powered by the **Gemini Live API**. Instead of memorising CLI flags, you speak naturally and Klyra asks follow-up questions to gather the information it needs.
-
-### Setup
-
+### 2. Generate & Revise Question Papers
 ```bash
-# 1. Install PortAudio system library
-sudo apt install portaudio19-dev          # Debian/Ubuntu
-# brew install portaudio                  # macOS
+# Generate a question paper with parallel review and answer key verification
+klyra generate \
+  --subject ct \
+  --qp-name endterm-graph-qp \
+  --scope "all" \
+  --difficulty hard \
+  --type-counts "MCQ:5,MSQ:3,NAT:2" \
+  --pyq-similar 4 \
+  --concepts "directed graphs, PageRank, shortest paths" \
+  --notes "Include TikZ graph diagrams where appropriate"
 
-# 2. Install Python voice dependencies
-pip install -e ".[voice]"
-
-# 3. Add voice config to .env (optional — defaults shown)
-KLYRA_VOICE_MODEL=gemini-3-flash-live     # Gemini Live model
-KLYRA_VOICE_NAME=Puck                     # Voice: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr
+# Revise an existing question paper using automated review feedback or custom notes
+klyra revise \
+  --subject ct \
+  --qp-name endterm-graph-qp \
+  --notes "Make Question 3's edge weights unambiguous"
 ```
 
-### Usage
-
+### 3. Generate & Revise Coding Problems
 ```bash
-klyra voice                    # Start with default voice
-klyra voice --voice Kore       # Use a specific voice
+# Generate Docker-verified coding problems with public & private test cases
+klyra code \
+  --subject python \
+  --name matrix-lab \
+  --language python \
+  --scope "all" \
+  --difficulty hard \
+  --num-questions 2 \
+  --public-tests 2 \
+  --private-tests 3 \
+  --concepts "2D matrices, simulation"
+
+# Revise a coding problem set
+klyra revise-code \
+  --subject python \
+  --name matrix-lab \
+  --language python \
+  --notes "Clarify input bounds for negative integers in Problem 2"
+
+# Re-verify an on-disk coding package against its test suite
+klyra skill --subject python --verify-code matrix-lab
 ```
 
-### Example Conversation
+### 4. Teaching Materials, Format Conversion & Utilities
+```bash
+# Prepare a live teaching session plan
+klyra teach \
+  --subject dbms \
+  --session-name week4-normalization \
+  --scope "week_4" \
+  --notes "60 min live session, intuition before BCNF formalism, 2 worked examples"
 
+# Revise a teaching session plan
+klyra revise-teach \
+  --subject dbms \
+  --session-name week4-normalization \
+  --notes "Add a 3NF vs BCNF comparison table"
+
+# Convert generated Markdown to LaTeX (.tex), PDF (.pdf), or Word (.docx)
+klyra convert \
+  --subject ct \
+  --input docs/ct/generated/endterm-graph-qp-qp.md \
+  --to tex
+
+# Download a YouTube lecture transcript into docs/<subject>/transcripts/
+klyra transcript \
+  --subject dbms \
+  --url "https://www.youtube.com/watch?v=..." \
+  --name week4-lecture
+
+# Inspect, validate, or initialize a subject's skill.md configuration
+klyra skill --subject ct --show
+klyra skill --subject ct --validate
+klyra skill --subject new-course --init
 ```
-$ klyra voice
 
-  🎙  Klyra voice ready.  (model=gemini-3-flash-live, voice=Puck)
-  Speak naturally. Press Ctrl+C to exit.
+---
 
-You:   "Create a question paper for DBMS."
-Klyra: "Sure! What should I name this paper?"
-You:   "Midterm."
-Klyra: "Which weeks should I cover?"
-You:   "Weeks one through four."
-Klyra: "What difficulty level?"
-You:   "Medium."
-Klyra: "What types of questions and how many? For example, MCQ 5, MSQ 3."
-You:   "Five MCQs and five MSQs."
-Klyra: "Got it. I'll generate a medium-difficulty midterm for DBMS covering
-        weeks 1-4 with 5 MCQs and 5 MSQs. Shall I proceed?"
-You:   "Yes."
+## 🌐 Web Studio & REST API
 
-  ⚙  Executing: generate_question_paper...
-  ✓  generate_question_paper completed.
+### Web Studio (`klyra web`)
+- **Chat & Voice**: Converse with Klyra by text or live microphone streaming (`/ws`).
+- **Inline Previews & Lightbox**: View generated Markdown, LaTeX, and math formulas (via MathJax), click any generated TikZ diagram to zoom, or toggle raw Markdown.
+- **One-Click ZIP Bundles**: Download complete coding problem packages (including `problem-N/` folders, test cases, solutions, evaluation scripts, and raw `.md`/`.json` specs) or Question Paper bundles via `/api/download/<subject>/<name>`.
+- **Role-Based Access Control (RBAC)**:
+  - **Admins** have access to all courses, user management (`/admin`), and all generated files.
+  - **Instructors** are scoped to their assigned courses and own the files they generate.
 
-Klyra: "Done! The question paper has been generated."
+### REST API (`/api/v1/*`)
+All long-running generation tasks are also exposed as asynchronous REST endpoints (authenticated via `X-API-Key: <KLYRA_API_KEY>`):
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Health check for Qdrant, Redis, and server status |
+| `POST` | `/api/v1/ingest` | Enqueue document ingestion job |
+| `POST` | `/api/v1/generate` | Enqueue question paper generation job |
+| `POST` | `/api/v1/revise` | Enqueue question paper revision job |
+| `POST` | `/api/v1/coding-problems` | Enqueue coding problem set generation job |
+| `POST` | `/api/v1/coding-problems/revise` | Enqueue coding problem revision job |
+| `POST` | `/api/v1/teaching-material` | Enqueue teaching material generation job |
+| `POST` | `/api/v1/teaching-material/revise` | Enqueue teaching material revision job |
+| `POST` | `/api/v1/convert` | Enqueue format conversion job |
+| `POST` | `/api/v1/transcript` | Enqueue YouTube transcript fetch job |
+| `GET` | `/api/v1/jobs/{job_id}` | Poll async job status, result, or error |
+
+---
+
+## Subject Directory Convention (`docs/<subject>/`)
+
+Each course lives under `docs/<subject>/`:
+
+```text
+docs/<subject>/
+├── skill.md                  # Subject-specific pedagogical, notation & language configuration
+├── week_1/ ... week_12/      # Weekly lecture slides, notes, PDFs, or code samples
+├── pyq/                      # Past-year question papers
+├── transcripts/              # Lecture transcripts
+├── additional/               # Reference sheets or supplementary materials
+├── .assets/
+│   ├── extracted/            # Diagrams extracted from source PDFs during ingestion
+│   └── generated/            # Self-verified TikZ diagrams generated for QPs & problems
+└── generated/
+    ├── <qp>-qp.md / .json              # Generated Question Paper
+    ├── <qp>-answer-key.md / .json      # Independently verified Answer Key
+    ├── <qp>-discrepancy-report.md      # Reviewer Discrepancy Report
+    ├── <qp>-final-summary.md           # Final Sign-Off Summary
+    ├── teaching/                       # Generated teaching session plans
+    └── coding/
+        ├── <pkg>-problems.md / .json   # Student-facing problem descriptions
+        ├── <pkg>-testcases.md / .json  # Full test suite & reference solutions
+        └── <pkg>/                      # Executable package directory (problem-1/, problem-2/, ...)
 ```
 
-### Available Voice Commands
+---
 
-All CLI features are available through voice:
+## Configuration & Environment Variables
 
-| Voice intent | What it does |
-|---|---|
-| "Ingest materials for data structures" | `klyra ingest --subject data-structures` |
-| "Create a question paper" | `klyra generate ...` |
-| "Revise the midterm paper" | `klyra revise ...` |
-| "Convert to LaTeX" | `klyra convert ...` |
-| "Prepare teaching material" | `klyra teach ...` |
-| "Revise the teaching material" | `klyra revise-teach ...` |
-| "Get a transcript from YouTube" | `klyra transcript ...` |
-| "Generate coding problems" | `klyra code ...` |
-| "Revise the coding problems" | `klyra revise-code ...` |
-| "Delete index entries" | `klyra delete-index ...` |
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `GEMINI_API_KEY` | *(Required)* | Google Gemini API key for LLM, Vision, Live API, and Embeddings |
+| `KLYRA_MODEL` | `gemini/gemini-3-flash-preview` | Primary LiteLLM model identifier used by CrewAI agents |
+| `KLYRA_CHAT_MODEL` | `gemini-3.5-flash-lite` | Model used by `ChatOrchestrator` in web & terminal chat |
+| `KLYRA_VOICE_MODEL` | `gemini-3.1-flash-live-preview` | Gemini Live model for real-time voice sessions |
+| `KLYRA_VOICE_NAME` | `Puck` | Voice persona (`Puck`, `Charon`, `Kore`, `Fenrir`, `Aoede`, `Leda`, `Orus`, `Zephyr`) |
+| `EMBEDDING_PROVIDER` | `google` | Embedding provider (`google` or `openai`) |
+| `GOOGLE_EMBEDDING_MODEL` | `models/gemini-embedding-2-preview` | Gemini embedding model for Qdrant vector indexing |
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant server URL (falls back to local `.qdrant/` if unset) |
+| `DATABASE_URL` | `sqlite:///.db/klyra.db` | SQLAlchemy database URL (PostgreSQL in Docker, SQLite locally) |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis URL for Celery task queue |
+| `KLYRA_SESSION_SECRET` | *(Auto-generated in dev)* | HMAC secret for signing web session cookies (set in production) |
+| `KLYRA_ADMIN_USERNAME` | `admin` | Bootstrap admin username |
+| `KLYRA_ADMIN_PASSWORD` | *(Printed on first boot)* | Bootstrap admin password |
+| `KLYRA_API_KEY` | *(Optional)* | API key for `/api/v1/*` (`X-API-Key` header) |
+| `GOOGLE_CLIENT_ID` | *(Optional)* | Google OAuth 2.0 Client ID for "Sign in with Google" |
+| `GOOGLE_CLIENT_SECRET` | *(Optional)* | Google OAuth 2.0 Client Secret |
 
-### WSL Note
+---
 
-On WSL2, audio requires PulseAudio/PipeWire forwarding from the Windows host. Windows 11 with WSLg should work out of the box — run `pactl info` to check. If audio isn't working, `klyra voice` will print detailed setup instructions.
+## Contributing
 
-## Roadmap: SaaS API Monetization
+Contributions, bug reports, and feature requests are welcome!
 
-If you plan to transition Klyra from a single-tenant tool to a **paid SaaS product**, you will need to replace the current single-admin authentication (`KLYRA_API_KEY`) and IP-based rate limiting (`slowapi`) with a robust, multi-tenant API key and quota system.
+1. Fork the repository and create your feature branch (`git checkout -b feat/amazing-feature`).
+2. Install development dependencies (`pip install -e ".[dev]"`).
+3. Ensure all tests pass (`pytest -v`) and lint checks succeed (`ruff check src/ tests/`).
+4. Open a Pull Request describing your changes.
 
-Below is the architectural plan to implement user-based API keys with per-service usage limits.
-
-### 1. Database Schema Updates & Storage Choices (Postgres vs NoSQL)
-Move beyond the current `jobs` table and local `.db` JSON session files by adding user identity, billing tracking, and session tracking.
-
-**Why PostgreSQL for Production?**
-While NoSQL databases (like MongoDB) are often praised for chat applications due to their document-oriented flexibility, **PostgreSQL is heavily recommended for Klyra in production.**
-*   **JSONB Support:** Postgres offers robust `JSONB` columns, giving you the exact same schema-less flexibility as NoSQL for storing varying Gemini message histories.
-*   **Relational Integrity:** Unlike pure NoSQL, Postgres allows you to enforce strict relational integrity for your SaaS elements (Users, Subscriptions, Workspaces, Quotas, and API Keys).
-*   **Simplified Stack:** Since Klyra already uses Postgres/SQLite for its Job queue via SQLAlchemy, adding a `sessions` table to Postgres keeps your infrastructure footprint small and highly cohesive.
-
-**Proposed Tables:**
-- **`users`**: `id`, `email`, `stripe_customer_id`, `subscription_tier` (e.g., Free, Pro, Enterprise).
-- **`api_keys`**: `id`, `user_id`, `key_prefix`, `hashed_key`.
-- **`sessions`**: `id`, `user_id`, `title`, `history` (JSONB column containing the `ChatOrchestrator` interaction history).
-
-### 2. Redis Quota Tracking (Token Bucket)
-Since Klyra already uses Redis for Celery, leverage it to track API limits quickly without overwhelming Postgres.
-
-- **Storage Strategy**: Use Redis counters with monthly expirations. 
-  - Key format: `quota:{user_id}:generate_qp:2026-08`
-- **Tier Limits**: Define limits per tier in code or DB.
-  - *Free*: 5 Question Papers/mo, 2 Coding Sets/mo.
-  - *Pro*: 50 Question Papers/mo, 50 Coding Sets/mo.
-
-### 3. FastAPI Dependency Changes (`dependencies.py`)
-Replace the current `require_api_key` and `slowapi` setup with a custom middleware/dependency pipeline:
-
-1. **Authentication**: 
-   - Extract `X-API-Key` from the header.
-   - Hash the key and look it up in the `api_keys` table.
-   - Attach the resulting `User` object to `request.state.user`.
-2. **Quota Verification**:
-   - Create a new dependency: `def require_quota(service: str, cost: int = 1)`
-   - Before a route (e.g., `/api/v1/generate`) executes, check the user's tier limits against their current Redis usage counter.
-   - If `usage + cost > limit`, raise `HTTP 429 Too Many Requests`.
-3. **Deduction**:
-   - If the quota check passes, increment the Redis counter.
-
-### 4. Billing Integration (Stripe / LemonSqueezy)
-- **Checkout**: When a user subscribes, generate their API key and show it to them *once*.
-- **Webhooks**: Expose a `/webhooks/stripe` endpoint. When a `customer.subscription.updated` event arrives, update the user's `subscription_tier` in the database. The Redis quota checks will immediately reflect the new, higher limits.
-
-### 5. Securing the Job Queue
-Currently, jobs don't track ownership. Update the `JobRecord` schema to include a `user_id`. When users poll the `/api/v1/jobs/{job_id}` endpoint or attempt to fetch generated files, verify that `request.state.user.id == job.user_id` to prevent users from accessing others' generated materials.

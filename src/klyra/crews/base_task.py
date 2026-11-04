@@ -9,7 +9,7 @@ from crewai import Task
 from pydantic import BaseModel, PrivateAttr
 
 from klyra.services.skill_service import build_skill_prompt_inputs, load_subject_skill
-from klyra.utils.format_renderer import render_task_output_markdown
+from klyra.utils.format_renderer import render_task_output_markdown, save_dual_output
 
 _ACTIVE_CREW_INPUTS: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "_ACTIVE_CREW_INPUTS", default={}
@@ -133,24 +133,12 @@ class KlyraTask(Task):
             except Exception:
                 skill = None
 
-            # 1. Write the structured JSON sidecar (`<stem>.json`)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            json_sidecar = out_path.with_suffix(".json")
-            json_sidecar.write_text(
-                pydantic_model.model_dump_json(indent=2), encoding="utf-8"
-            )
-
-            # 2. Render subject-formatted Markdown and write to `<stem>.md`
-            context_md = render_task_output_markdown(
-                pydantic_model, skill=skill, for_student_file=False
-            )
-            file_md = render_task_output_markdown(
-                pydantic_model, skill=skill, for_student_file=True
+            context_md, _ = save_dual_output(
+                pydantic_model, out_path, subject=subj, skill=skill
             )
             if self.output is not None:
                 self.output.raw = context_md
                 self.output.pydantic = pydantic_model
-            super()._save_file(file_md)
             return
 
         super()._save_file(result)

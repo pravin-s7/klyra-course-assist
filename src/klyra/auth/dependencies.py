@@ -61,7 +61,8 @@ def can_read_generated_file(user: UserRecord, rel_path: str) -> bool:
     if not can_access_subject(user, subject):
         return False
     if len(parts) > 2 and parts[1] == "generated":
-        return repo.get_file_owner(rel_path) == user.id
+        owner = repo.get_file_owner(rel_path)
+        return owner is None or owner == user.id
     return True
 
 

@@ -1,0 +1,29 @@
+\documentclass[12pt, answers]{exam}
+\IfFileExists{Templates/packages.tex}{\input{Templates/packages}}{\IfFileExists{Templates/packages}{\input{Templates/packages}}{\usepackage{amsmath,amssymb,graphicx,array,booktabs,xcolor}}}
+\IfFileExists{tfrupee.sty}{\usepackage{tfrupee}}{\providecommand{\rupee}{Rs.~}}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, calc, positioning} 
+\usepackage[normalem]{ulem}
+
+\def\ojoin{\setbox0=\hbox{$\bowtie$}%
+  \rule[-.02ex]{.25em}{.4pt}\llap{\rule[\ht0]{.25em}{.4pt}}}
+\def\leftouterjoin{\mathbin{\ojoin\mkern-5.8mu\bowtie}}
+\def\rightouterjoin{\mathbin{\bowtie\mkern-5.8mu\ojoin}}
+\def\fullouterjoin{\mathbin{\ojoin\mkern-5.8mu\bowtie\mkern-5.8mu\ojoin}}
+
+\begin{document}
+%Title starts here
+\begin{center}
+\fbox{\fbox{\parbox{5.5in}{\centering
+\large __SUBJECT_DISPLAY__ \\
+__PAPER_TITLE__  \\
+Total Marks: __TOTAL_MARKS__
+ \\
+}}}
+\end{center}
+\CorrectChoiceEmphasis{\color{black}}
+
+\begin{questions}
+

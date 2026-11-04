@@ -754,32 +754,14 @@ def render_combined_exam_latex(
         or prefix.replace("-", " ").title()
     )
 
+    _EXAM_PREAMBLE_PATH = (
+        Path(__file__).resolve().parent.parent / "templates" / "latex" / "exam_preamble.tex"
+    )
     preamble = (
-        "\\documentclass[12pt, answers]{exam}\n"
-        "\\IfFileExists{Templates/packages.tex}{\\input{Templates/packages}}{\\IfFileExists{Templates/packages}{\\input{Templates/packages}}{\\usepackage{amsmath,amssymb,graphicx,array,booktabs,xcolor}}}\n"
-        "\\IfFileExists{tfrupee.sty}{\\usepackage{tfrupee}}{\\providecommand{\\rupee}{Rs.~}}\n"
-        "\\usepackage{caption}\n"
-        "\\usepackage{float}\n"
-        "\\usepackage{tikz}\n"
-        "\\usetikzlibrary{shapes.geometric, arrows.meta, calc, positioning} \n"
-        "\\usepackage[normalem]{ulem}\n\n"
-        "\\def\\ojoin{\\setbox0=\\hbox{$\\bowtie$}%\n"
-        "  \\rule[-.02ex]{.25em}{.4pt}\\llap{\\rule[\\ht0]{.25em}{.4pt}}}\n"
-        "\\def\\leftouterjoin{\\mathbin{\\ojoin\\mkern-5.8mu\\bowtie}}\n"
-        "\\def\\rightouterjoin{\\mathbin{\\bowtie\\mkern-5.8mu\\ojoin}}\n"
-        "\\def\\fullouterjoin{\\mathbin{\\ojoin\\mkern-5.8mu\\bowtie\\mkern-5.8mu\\ojoin}}\n\n"
-        "\\begin{document}\n"
-        "%Title starts here\n"
-        "\\begin{center}\n"
-        "\\fbox{\\fbox{\\parbox{5.5in}{\\centering\n"
-        f"\\large {_escape_latex_prose(subject_display)} \\\\\n"
-        f"{_escape_latex_prose(paper_title)}  \\\\\n"
-        f"Total Marks: {total_marks}\n"
-        " \\\\\n"
-        "}}}\n"
-        "\\end{center}\n"
-        "\\CorrectChoiceEmphasis{\\color{black}}\n\n"
-        "\\begin{questions}\n"
+        _EXAM_PREAMBLE_PATH.read_text(encoding="utf-8")
+        .replace("__SUBJECT_DISPLAY__", _escape_latex_prose(subject_display))
+        .replace("__PAPER_TITLE__", _escape_latex_prose(paper_title))
+        .replace("__TOTAL_MARKS__", str(total_marks))
     )
 
     question_blocks: list[str] = []

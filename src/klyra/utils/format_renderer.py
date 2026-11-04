@@ -830,3 +830,39 @@ def verify_rendered_markdown(
                 )
 
     return errors
+
+
+def save_dual_output(
+    model: BaseModel,
+    output_path: Path | str,
+    subject: str | None = None,
+    skill: SubjectSkillConfig | None = None,
+    root: Path = DOCS_ROOT,
+) -> tuple[str, str]:
+    """Persist structured JSON (`.json`) and subject-rendered Markdown (`.md`) to disk.
+
+    Returns `(context_markdown, student_file_markdown)`.
+    """
+    out_path = Path(output_path).expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    resolved_skill = skill
+    if resolved_skill is None and subject:
+        try:
+            resolved_skill = load_subject_skill(subject, root=root)
+        except Exception:
+            resolved_skill = None
+    resolved_skill = _resolve_skill(model, resolved_skill, root=root)
+
+    json_sidecar = out_path.with_suffix(".json")
+    json_sidecar.write_text(model.model_dump_json(indent=2), encoding="utf-8")
+
+    context_md = render_task_output_markdown(
+        model, skill=resolved_skill, root=root, for_student_file=False
+    )
+    file_md = render_task_output_markdown(
+        model, skill=resolved_skill, root=root, for_student_file=True
+    )
+    out_path.write_text(file_md, encoding="utf-8")
+    return context_md, file_md
+

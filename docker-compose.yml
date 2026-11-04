@@ -5,12 +5,14 @@ x-klyra-common: &klyra-common
     - .env
   environment:
     - HOME=/tmp
+    - PYTHONPATH=/app/src
     - CREWAI_STORAGE_DIR=/tmp/crewai_storage
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-klyra}:${POSTGRES_PASSWORD:-klyrapass}@db:5432/${POSTGRES_DB:-klyradb}}
     - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
   volumes:
+    - ./src:/app/src
     - ./docs:/app/docs
     - ./.db:/app/.db
     # Share /tmp and docker.sock so Docker-outside-of-Docker code execution

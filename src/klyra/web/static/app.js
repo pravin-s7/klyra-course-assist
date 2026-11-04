@@ -496,18 +496,19 @@ function addFileCard(name, url, fileType) {
     const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
     const downloadSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
 
+    const downloadHref = url.startsWith('/api/download/') ? url : `${url}?download=true`;
     div.innerHTML = `
         <div class="file-card-row" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
             <div style="display: flex; align-items: center; gap: 12px; cursor: default;">
                 <span class="file-icon" style="display:flex; align-items:center; color: var(--text-muted);">${icon}</span>
                 <div class="file-info">
-                    <span class="file-name">${escapeHtml(name)}</span>
+                    <a href="${downloadHref}" download="${escapeHtml(name)}" class="file-name" style="color: inherit; text-decoration: none;">${escapeHtml(name)}</a>
                     <span class="file-type">${ext.replace('.', '')}</span>
                 </div>
             </div>
             <div class="file-card-actions">
                 ${canPreview ? `<a href="#" class="preview-link" title="${isImage ? 'Toggle Image Display' : 'Preview'}" style="display:flex; align-items:center;">${eyeSvg}</a>` : ''}
-                <a href="${url}?download=true" download="${escapeHtml(name)}" title="Download" style="display:flex; align-items:center;">${downloadSvg}</a>
+                <a href="${downloadHref}" download="${escapeHtml(name)}" title="Download" style="display:flex; align-items:center;">${downloadSvg}</a>
             </div>
         </div>
         ${isImage ? `
@@ -620,119 +621,8 @@ function scrollToBottom() {
     }
 }
 
-// ── Markdown & Image rendering ────────────────────────────────────
-function resolveAssetUrl(rawUrl, baseUrl = '') {
-    if (!rawUrl) return rawUrl;
-    let url = rawUrl.trim();
-    if (/^(https?:|data:|blob:)/i.test(url)) return url;
-
-    // Extract subject from baseUrl like '/files/<subject>/generated/...' if available
-    let subject = '';
-    const baseMatch = (baseUrl || '').match(/^\/files\/([^/]+)\//);
-    if (baseMatch) {
-        subject = baseMatch[1];
-    }
-
-    // 1. 'docs/<subject>/.assets/...' or 'docs/<subject>/assets/...'
-    const docsMatch = url.match(/^\/?docs\/([^/]+)\/\.?assets\/(.+)$/);
-    if (docsMatch) {
-        return `/files/${docsMatch[1]}/.assets/${docsMatch[2]}`;
-    }
-
-    // 2. '/files/<subject>/assets/...' (missing dot on .assets)
-    const filesAssetsMatch = url.match(/^\/files\/([^/]+)\/assets\/(.+)$/);
-    if (filesAssetsMatch) {
-        return `/files/${filesAssetsMatch[1]}/.assets/${filesAssetsMatch[2]}`;
-    }
-
-    // 3. Relative '../.assets/...', './.assets/...', '.assets/...', or '../assets/...'
-    const relAssetsMatch = url.match(/^(?:\.\.\/|\.\/)*\.?assets\/(.+)$/);
-    if (relAssetsMatch) {
-        if (subject) {
-            return `/files/${subject}/.assets/${relAssetsMatch[1]}`;
-        }
-        return `/.assets/${relAssetsMatch[1]}`;
-    }
-
-    // 4. '<subject>/.assets/...' without leading '/files/'
-    const subjAssetsMatch = url.match(/^([a-zA-Z0-9_-]+)\/\.assets\/(.+)$/);
-    if (subjAssetsMatch) {
-        return `/files/${subjAssetsMatch[1]}/.assets/${subjAssetsMatch[2]}`;
-    }
-
-    return url;
-}
-
-function normalizeMarkdownImages(text, baseUrl = '') {
-    if (!text) return '';
-    // Try to infer subject from text if baseUrl didn't provide it
-    let inferredBase = baseUrl;
-    if (!inferredBase) {
-        const subjMatch = text.match(/\/files\/([a-zA-Z0-9_-]+)\/|docs\/([a-zA-Z0-9_-]+)\//);
-        if (subjMatch) {
-            const s = subjMatch[1] || subjMatch[2];
-            inferredBase = `/files/${s}/`;
-        }
-    }
-
-    // 1. Rewrite ![alt](url) image paths
-    let out = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, rawUrl) => {
-        const resolved = resolveAssetUrl(rawUrl, inferredBase);
-        return `![${alt}](${resolved})`;
-    });
-
-    // 2. Convert non-image markdown links [label](url.png) that point to image files into inline images
-    out = out.replace(/(?<!!)\[([^\]]+)\]\(([^)]+\.(?:png|jpg|jpeg|gif|svg|webp)(?:\?[^)]*)?)\)/gi, (match, label, rawUrl) => {
-        const resolved = resolveAssetUrl(rawUrl, inferredBase);
-        return `![${label}](${resolved})`;
-    });
-
-    return out;
-}
-
-function renderMarkdown(text, baseUrl = '') {
-    if (!text) return '';
-    try {
-        const normalized = normalizeMarkdownImages(text, baseUrl);
-        return marked.parse(normalized);
-    } catch (e) {
-        console.error("Markdown parsing failed:", e);
-        return escapeHtml(text);
-    }
-}
-
-function openImageLightbox(src, altText = '') {
-    let overlay = document.getElementById('imageLightboxOverlay');
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.id = 'imageLightboxOverlay';
-        overlay.className = 'image-lightbox-overlay';
-        overlay.innerHTML = `
-            <div class="image-lightbox-content">
-                <button class="image-lightbox-close" title="Close (Esc)">✕</button>
-                <img class="image-lightbox-img" src="" alt="" />
-                <div class="image-lightbox-caption"></div>
-            </div>
-        `;
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay || e.target.classList.contains('image-lightbox-close')) {
-                overlay.style.display = 'none';
-            }
-        });
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && overlay.style.display === 'flex') {
-                overlay.style.display = 'none';
-            }
-        });
-        document.body.appendChild(overlay);
-    }
-    const img = overlay.querySelector('.image-lightbox-img');
-    const cap = overlay.querySelector('.image-lightbox-caption');
-    img.src = src;
-    img.alt = altText || '';
-    cap.textContent = altText || '';
-    overlay.style.display = 'flex';
-}
+// Markdown & Lightbox helpers (`resolveAssetUrl`, `normalizeMarkdownImages`,
+// `renderMarkdown`, `openImageLightbox`, `escapeHtml`) are loaded from `/static/markdown.js`.
 
 // Click-to-zoom delegation for any rendered image inside chat messages or previews
 if (messages) {
@@ -746,12 +636,6 @@ if (messages) {
             openImageLightbox(target.src, target.alt || '');
         }
     });
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 let isGenerating = false;
