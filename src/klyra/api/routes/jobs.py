@@ -16,7 +16,7 @@ from klyra.models.responses import GeneratedFilesResponse, JobListResponse, JobS
 from klyra.services import job_store, results_service
 from klyra.utils import fs
 
-router = APIRouter(tags=["jobs"], dependencies=[Depends(require_api_key)])
+router = APIRouter(tags=["jobs"])
 
 
 def _to_response(job: dict[str, Any]) -> JobStatusResponse:

@@ -70,53 +70,54 @@ def week_dir_name(week: int) -> str:
     return f"week_{week}"
 
 
-def subject_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
-    return root / validate_subject(subject)
+def subject_dir(subject: str, root: Path | None = None) -> Path:
+    base = root if root is not None else DOCS_ROOT
+    return base / validate_subject(subject)
 
 
-def check_subject_exists(subject: str, root: Path = DOCS_ROOT) -> None:
+def check_subject_exists(subject: str, root: Path | None = None) -> None:
     path = subject_dir(subject, root)
     if not path.exists() or not path.is_dir():
         raise ValueError(f"Subject directory does not exist: {path}. Please create it manually before running tools.")
 
 
-def week_dir(subject: str, week: int, root: Path = DOCS_ROOT) -> Path:
+def week_dir(subject: str, week: int, root: Path | None = None) -> Path:
     return subject_dir(subject, root) / week_dir_name(week)
 
 
-def additional_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
+def additional_dir(subject: str, root: Path | None = None) -> Path:
     return subject_dir(subject, root) / ADDITIONAL_DIR_NAME
 
 
-def pyq_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
+def pyq_dir(subject: str, root: Path | None = None) -> Path:
     return subject_dir(subject, root) / PYQ_DIR_NAME
 
 
-def transcripts_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
+def transcripts_dir(subject: str, root: Path | None = None) -> Path:
     return subject_dir(subject, root) / TRANSCRIPTS_DIR_NAME
 
 
-def generated_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
+def generated_dir(subject: str, root: Path | None = None) -> Path:
     return subject_dir(subject, root) / GENERATED_DIR_NAME
 
 
-def coding_package_dir(subject: str, name: str, root: Path = DOCS_ROOT) -> Path:
+def coding_package_dir(subject: str, name: str, root: Path | None = None) -> Path:
     """Student-facing problem package: README, public/private test folders,
     evaluation_script. Lives next to the generated markdown reports."""
     return generated_dir(subject, root) / "coding" / slugify(name)
 
 
-def assets_dir(subject: str, root: Path = DOCS_ROOT) -> Path:
+def assets_dir(subject: str, root: Path | None = None) -> Path:
     """Where extracted images (diagrams pulled out of source PDFs) live."""
     return subject_dir(subject, root) / ASSETS_DIR_NAME
 
 
-def subject_skill_path(subject: str, root: Path = DOCS_ROOT) -> Path:
+def subject_skill_path(subject: str, root: Path | None = None) -> Path:
     """Per-subject skill configuration file (`docs/<subject>/skill.md`)."""
     return subject_dir(subject, root) / SKILL_FILE_NAME
 
 
-def markdown_image_path(subject: str, image_path: Path, root: Path = DOCS_ROOT) -> str:
+def markdown_image_path(subject: str, image_path: Path, root: Path | None = None) -> str:
     """Relative path from a generated QP file's directory to an asset image,
     ready to paste directly into markdown image syntax."""
     rel = os.path.relpath(image_path, start=generated_dir(subject, root))
@@ -127,6 +128,7 @@ def is_supported_file(path: Path) -> bool:
     return (
         path.is_file()
         and not path.name.startswith(".")
+        and "__pycache__" not in path.parts
         and path.name != SKILL_FILE_NAME
         and path.suffix.lower() in SUPPORTED_SUFFIXES
     )

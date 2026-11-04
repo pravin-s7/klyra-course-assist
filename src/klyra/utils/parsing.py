@@ -6,16 +6,16 @@ from __future__ import annotations
 
 
 def parse_week_numbers(scope: str | None) -> list[int] | None:
-    """Week numbers implied by a scope string. None means all weeks 1-12.
+    """Week numbers implied by a scope string. None means all weeks 1-12 (or PYQ bank).
 
-    Accepts: "all", "week_3", "3", "week_1-week_4", "1-4", "1,3,5",
+    Accepts: "all", "any", "pyq", "week_3", "3", "week_1-week_4", "1-4", "1,3,5",
     "1-3,5,7-9" (any mix of single weeks, ranges, and commas).
     """
     if scope is None:
         return None
         
     scope = scope.strip()
-    if scope.lower() == "all":
+    if scope.lower() in {"all", "any", "pyq", "pyqs", ""}:
         return None
 
     weeks: set[int] = set()

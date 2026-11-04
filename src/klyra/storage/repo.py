@@ -17,6 +17,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _to_json_native(value, default):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+    return json.loads(json.dumps(value, default=str))
+
+
 # ── Users ──────────────────────────────────────────────────────────
 
 def create_user(username: str, password_hash: str, role: str, courses: list[str], full_name: str | None = None, email: str | None = None) -> UserRecord:
@@ -28,7 +39,7 @@ def create_user(username: str, password_hash: str, role: str, courses: list[str]
             email=email,
             password_hash=password_hash,
             role=role,
-            courses_json=json.dumps(courses),
+            courses_json=_to_json_native(courses, []),
             created_at=_now(),
         )
         session.add(user)
@@ -66,7 +77,7 @@ def update_user(user_id: str, **fields) -> UserRecord | None:
         if "role" in fields:
             user.role = fields["role"]
         if "courses" in fields:
-            user.courses_json = json.dumps(fields["courses"])
+            user.courses_json = _to_json_native(fields["courses"], [])
         if "full_name" in fields:
             user.full_name = fields["full_name"]
         if "email" in fields:
@@ -85,8 +96,12 @@ def delete_user(user_id: str) -> bool:
 
 
 def user_courses(user: UserRecord) -> list[str]:
+    val = user.courses_json
+    if isinstance(val, list):
+        return [str(x) for x in val]
     try:
-        return json.loads(user.courses_json or "[]")
+        parsed = json.loads(val or "[]")
+        return [str(x) for x in parsed] if isinstance(parsed, list) else []
     except (ValueError, TypeError):
         return []
 
@@ -144,8 +159,8 @@ def save_chat_session(
             record.owner_id = owner_id
             if record.title == "New Chat" and title and title != "New Chat":
                 record.title = title
-        record.ui_history_json = json.dumps(ui_history, default=str)
-        record.gemini_history_json = json.dumps(gemini_history, default=str)
+        record.ui_history_json = _to_json_native(ui_history, [])
+        record.gemini_history_json = _to_json_native(gemini_history, {})
         session.add(record)
 
 

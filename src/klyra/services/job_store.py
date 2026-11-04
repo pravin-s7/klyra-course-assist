@@ -42,24 +42,52 @@ class JobRecord(Base):
     started_at = Column(String, nullable=True)
     finished_at = Column(String, nullable=True)
 
+import time
+
 _engine = None
 _SessionLocal = None
+_engine_key: str | None = None
+
+
+def _current_jobs_db_key() -> str:
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+        return f"url:{db_url}"
+    db_path = Path(os.environ.get("KLYRA_JOBS_DB", ".klyra_jobs.sqlite3")).resolve()
+    return f"sqlite:{db_path}"
+
 
 def _get_engine():
-    global _engine, _SessionLocal
-    if _engine is None:
+    global _engine, _SessionLocal, _engine_key
+    key = _current_jobs_db_key()
+    if _engine is None or _engine_key != key:
+        if _engine is not None:
+            try:
+                _engine.dispose()
+            except Exception:
+                pass
         db_url = os.environ.get("DATABASE_URL")
         if db_url:
             if db_url.startswith("postgres://"):
                 db_url = db_url.replace("postgres://", "postgresql://", 1)
-            _engine = create_engine(db_url, pool_size=10, max_overflow=20)
+            _engine = create_engine(db_url, pool_size=10, max_overflow=20, pool_pre_ping=True)
         else:
             db_path = Path(os.environ.get("KLYRA_JOBS_DB", ".klyra_jobs.sqlite3"))
             if db_path.parent != Path("."):
                 db_path.parent.mkdir(parents=True, exist_ok=True)
             _engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         _SessionLocal = sessionmaker(bind=_engine)
-        Base.metadata.create_all(bind=_engine)
+        for attempt in range(15):
+            try:
+                Base.metadata.create_all(bind=_engine)
+                break
+            except Exception:
+                if attempt == 14:
+                    raise
+                time.sleep(1.0)
+        _engine_key = key
     return _SessionLocal
 
 @contextmanager

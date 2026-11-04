@@ -4,10 +4,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from klyra.api.dependencies import DEFAULT_RATE_LIMIT, limiter, require_api_key
-from klyra.celery_app import celery_app
+from klyra.celery_app import dispatch_job
 from klyra.models.requests import GenerateRequest
 from klyra.models.responses import JobAccepted
 from klyra.services import job_store
+from klyra.services.generation_service import run_generation, run_generation as _orig_run_generation
 from klyra.utils import fs
 
 router = APIRouter(tags=["generation"])
@@ -37,21 +38,21 @@ def generate(
         )
 
     job_id = job_store.create_job("generate", subject=subject, qp_name=req.qp_name)
-    celery_app.send_task(
+    dispatch_job(
         "klyra.worker.run_generation_task",
-        kwargs=dict(
-            job_id=job_id,
-            subject=subject,
-            qp_name=req.qp_name,
-            scope=req.scope,
-            difficulty=req.difficulty,
-            source=req.source,
-            pyq_similar=req.pyq_similar,
-            concepts=req.concepts,
-            type_counts=req.type_counts,
-            types=req.types,
-            num_questions=req.num_questions,
-            notes=req.notes,
-        )
+        job_id,
+        run_generation,
+        _orig_run_generation,
+        subject=subject,
+        qp_name=req.qp_name,
+        scope=req.scope,
+        difficulty=req.difficulty,
+        source=req.source,
+        pyq_similar=req.pyq_similar,
+        concepts=req.concepts,
+        type_counts=req.type_counts,
+        types=req.types,
+        num_questions=req.num_questions,
+        notes=req.notes,
     )
     return JobAccepted(job_id=job_id)

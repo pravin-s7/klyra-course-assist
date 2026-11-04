@@ -58,20 +58,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from fastapi import Depends
-from klyra.api.dependencies import require_api_key
-
-_auth = [Depends(require_api_key)]
-
-app.include_router(files.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(ingestion.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(generation.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(revision.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(conversion.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(teaching_material.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(coding_problem.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(transcript.router, prefix="/api/v1", dependencies=_auth)
-app.include_router(jobs.router, prefix="/api/v1", dependencies=_auth)
+app.include_router(files.router, prefix="/api/v1")
+app.include_router(ingestion.router, prefix="/api/v1")
+app.include_router(generation.router, prefix="/api/v1")
+app.include_router(revision.router, prefix="/api/v1")
+app.include_router(conversion.router, prefix="/api/v1")
+app.include_router(teaching_material.router, prefix="/api/v1")
+app.include_router(coding_problem.router, prefix="/api/v1")
+app.include_router(transcript.router, prefix="/api/v1")
+app.include_router(jobs.router, prefix="/api/v1")
 
 
 @app.get("/health", response_model=HealthResponse)

@@ -49,10 +49,13 @@ def save_and_index_images(
     for idx, image in enumerate(images):
         image_path = out_dir / f"p{image.page}-{idx}.{image.ext}"
         image_path.write_bytes(image.data)
+        mime_type = f"image/{'jpeg' if image.ext in ('jpg', 'jpeg') else 'png'}"
         chunks.append(
             {
                 "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_file}::img::{idx}")),
                 "text": f"{caption_text} (page {image.page})",
+                "image_bytes": image.data,
+                "image_mime_type": mime_type,
                 "metadata": {
                     "subject": subject,
                     "week": week or 0,

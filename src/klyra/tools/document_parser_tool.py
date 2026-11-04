@@ -239,10 +239,14 @@ class DocumentParserTool(BaseTool):
                     degraded.append(key)
     
             fs.save_manifest(subject, manifest)
-    
+
             lines = [
                 f"Parsed {len(parsed)} file(s), skipped {len(skipped)} unchanged, {len(failed)} failed."
             ]
+            if parsed:
+                lines.append("Parsed files: " + ", ".join(parsed[:25]))
+            if skipped:
+                lines.append("Skipped (unchanged) files: " + ", ".join(skipped[:25]))
             if total_images:
                 lines.append(f"Extracted {total_images} diagram(s)/figure(s) for use in generated questions.")
             if degraded:
@@ -252,6 +256,36 @@ class DocumentParserTool(BaseTool):
                 )
             if failed:
                 lines.append("Failed: " + "; ".join(failed))
+
+            # Always include a complete status summary across all 4 folder categories
+            try:
+                all_disk_files = fs.discover_subject_files(subject)
+                gaps = fs.missing_weeks(subject)
+                covered_weeks = [w for w in range(1, fs.NUM_WEEKS + 1) if w not in gaps]
+                cat_map = {
+                    "week": ("weeks (week_1..week_12)", [f for f in all_disk_files if f.category == "week"]),
+                    "pyq": (f"pyq (docs/{subject}/pyq)", [f for f in all_disk_files if f.category == "pyq"]),
+                    "transcript": (f"transcripts (docs/{subject}/transcripts)", [f for f in all_disk_files if f.category == "transcript"]),
+                    "additional": (f"additional (docs/{subject}/additional)", [f for f in all_disk_files if f.category == "additional"]),
+                }
+                lines.append("Folder / Category Status:")
+                for cat_key, (label, cat_files) in cat_map.items():
+                    ingested_files = [f for f in cat_files if str(f.path) in manifest]
+                    cat_chunks = sum(
+                        int(manifest.get(str(f.path), {}).get("chunks", 0))
+                        for f in ingested_files
+                    )
+                    extra = ""
+                    if cat_key == "week":
+                        w_str = ", ".join(str(w) for w in covered_weeks) if covered_weeks else "none"
+                        extra = f" [covered weeks: {w_str}]"
+                    lines.append(
+                        f"- {label}: {len(cat_files)} file(s) on disk, "
+                        f"{len(ingested_files)} ingested ({cat_chunks} chunks){extra}"
+                    )
+            except Exception:
+                pass
+
             return "\n".join(lines)
         except Exception as e:
             return f"Error executing parser: {e}"

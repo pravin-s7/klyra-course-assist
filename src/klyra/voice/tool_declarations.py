@@ -25,7 +25,6 @@ def get_all_declarations() -> list[dict]:
         _delete_index(),
         _read_document(),
         _list_documents(),
-        _generate_diagram(),
         _get_subject_skill(),
         _update_subject_skill(),
         _verify_coding_package(),
@@ -412,7 +411,7 @@ def _generate_coding_problems() -> dict:
                 "language": {
                     "type": "STRING",
                     "description": (
-                        "Programming language: python, java, c, cpp, bash, sql, postgresql, or python-db."
+                        "Programming language: python, java, c, cpp, bash, sed, awk, gawk, sql, postgresql, or python-db."
                     ),
                 },
                 "scope": {
@@ -508,7 +507,7 @@ def _revise_coding_problems() -> dict:
                 "language": {
                     "type": "STRING",
                     "description": (
-                        "Programming language: python, java, c, cpp, bash, sql, postgresql, or python-db."
+                        "Programming language: python, java, c, cpp, bash, sed, awk, gawk, sql, postgresql, or python-db."
                     ),
                 },
                 "notes": {

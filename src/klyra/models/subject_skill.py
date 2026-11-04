@@ -77,5 +77,29 @@ class SubjectSkillConfig(BaseModel):
         return self.domain_pedagogical_rules
 
     @property
+    def domain_rules_markdown(self) -> str:
+        return self.domain_pedagogical_rules
+
+    @property
+    def diagram_conventions_markdown(self) -> str:
+        return self.diagram_visual_conventions
+
+    @property
     def qp_format_instructions(self) -> str:
         return self.qp_output_format_rules
+
+    @property
+    def qp_format_markdown(self) -> str:
+        return self.qp_output_format_rules
+
+    @property
+    def answer_key_format_markdown(self) -> str:
+        return self.answer_key_output_format_rules
+
+    @property
+    def coding_format_markdown(self) -> str:
+        return self.coding_output_format_rules
+
+    @property
+    def teaching_format_markdown(self) -> str:
+        return self.teaching_output_format_rules

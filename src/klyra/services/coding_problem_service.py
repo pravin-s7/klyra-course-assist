@@ -28,6 +28,9 @@ _SOLUTION_EXT_MAP = {
     "bash": "sh",
     "sh": "sh",
     "shell": "sh",
+    "sed": "sed",
+    "awk": "awk",
+    "gawk": "awk",
     "sql": "sql",
     "sqlite": "sql",
     "postgresql": "sql",
@@ -72,16 +75,36 @@ def verify_on_disk_coding_package(
 
     Returns `(all_passed, diagnostic_report)`.
     """
-    from klyra.models.task_outputs import TestCaseValidationOutput
-    from klyra.tools.code_execution_tool import docker_available, run_against_test_cases
+    from klyra.models.task_outputs import TestCaseValidationOutput, ValidatedProblemResult
+    from klyra.tools.code_execution_tool import (
+        DockerNotAvailableError,
+        docker_available,
+        run_against_test_cases,
+    )
     from klyra.utils import fs
-    from klyra.utils.task_guardrails import verify_and_sync_validated_problem
+    from klyra.utils.format_renderer import render_coding_readme_markdown
+    from klyra.utils.task_guardrails import (
+        _active_skill,
+        _backfill_problem_tests_from_disk,
+        _load_on_disk_problem_specs,
+        _sync_problem_spec_to_disk,
+        verify_and_sync_validated_problem,
+    )
 
     slug = fs.slugify(name)
     coding_dir = fs.generated_dir(subject) / "coding"
     pkg_root = fs.coding_package_dir(subject, name)
     lang = language.strip().lower()
     ext = _SOLUTION_EXT_MAP.get(lang, "txt")
+    skill = _active_skill(subject)
+
+    disk_specs = _load_on_disk_problem_specs(subject, slug)
+    if len(disk_specs) > 1:
+        for spec in disk_specs:
+            sub_dir = pkg_root / f"problem-{spec.problem_number}"
+            if not (sub_dir / "public").is_dir() or not (sub_dir / "README.md").exists():
+                _backfill_problem_tests_from_disk(spec, subject, slug, len(disk_specs))
+                _sync_problem_spec_to_disk(spec, subject, slug, len(disk_specs), skill)
 
     # 1. If structured sidecar `<slug>-testcases.json` exists, verify & sync via guardrail helper
     sidecar_candidates = [
@@ -94,7 +117,27 @@ def verify_on_disk_coding_package(
                 parsed = TestCaseValidationOutput.model_validate_json(
                     sidecar.read_text(encoding="utf-8")
                 )
-                total_probs = len(parsed.validated_problems)
+                if len(disk_specs) > len(parsed.validated_problems):
+                    existing_nums = {vp.problem_number for vp in parsed.validated_problems}
+                    for spec in disk_specs:
+                        if spec.problem_number not in existing_nums:
+                            _backfill_problem_tests_from_disk(spec, subject, slug, len(disk_specs))
+                            pub_tcs = spec.public_tests or spec.sample_tests
+                            priv_tcs = spec.private_tests
+                            if pub_tcs and priv_tcs and spec.reference_solution.strip():
+                                parsed.validated_problems.append(
+                                    ValidatedProblemResult(
+                                        problem_number=spec.problem_number,
+                                        title=spec.title,
+                                        language=spec.language,
+                                        reference_solution=spec.reference_solution,
+                                        readme_markdown=render_coding_readme_markdown(spec, skill),
+                                        public_tests=pub_tcs,
+                                        private_tests=priv_tcs,
+                                    )
+                                )
+                    parsed.validated_problems.sort(key=lambda vp: vp.problem_number)
+                total_probs = max(len(parsed.validated_problems), len(disk_specs))
                 errors: list[str] = []
                 for prob in parsed.validated_problems:
                     ok_prob, detail = verify_and_sync_validated_problem(
@@ -102,6 +145,7 @@ def verify_on_disk_coding_package(
                         subject=subject,
                         package_name=slug,
                         total_problems=total_probs,
+                        skill=skill,
                     )
                     if not ok_prob:
                         errors.append(detail)
@@ -165,7 +209,16 @@ def verify_on_disk_coding_package(
         return False, f"No problem package directories found under '{pkg_root}'."
 
     diagnostics: list[str] = []
+    if len(disk_specs) > 1 and len(problem_dirs) < len(disk_specs):
+        diagnostics.append(
+            f"Expected {len(disk_specs)} problem directories under '{pkg_root}', but found {len(problem_dirs)}."
+        )
+
     for pdir in problem_dirs:
+        if (pdir / default_script_name).exists():
+            for extra_script in ("evaluation_script.py", "evaluation_script.sh", "evaluation_script"):
+                if extra_script != default_script_name and (pdir / extra_script).exists():
+                    (pdir / extra_script).unlink(missing_ok=True)
         rel_label = pdir.relative_to(pkg_root).as_posix() if pdir != pkg_root else slug
         readme = pdir / "README.md"
         if not readme.exists() or not readme.read_text(encoding="utf-8").strip():
@@ -193,6 +246,26 @@ def verify_on_disk_coding_package(
 
         if docker_available():
             sol_code = sol_file.read_text(encoding="utf-8")
+            effective_lang = lang
+            if sol_file.suffix == ".sed":
+                effective_lang = "sed"
+            elif sol_file.suffix == ".gawk":
+                effective_lang = "gawk"
+            elif sol_file.suffix == ".awk":
+                effective_lang = "gawk" if lang == "gawk" else "awk"
+                try:
+                    from klyra.tools.code_execution_tool import detect_shell_script_dialect
+
+                    effective_lang = detect_shell_script_dialect(sol_code, effective_lang)
+                except Exception:
+                    pass
+            elif lang in {"bash", "sh", "shell", "sed", "awk", "gawk"}:
+                try:
+                    from klyra.tools.code_execution_tool import detect_shell_script_dialect
+
+                    effective_lang = detect_shell_script_dialect(sol_code, lang)
+                except Exception:
+                    effective_lang = lang
             exec_cases = [
                 {"input": c["input"], "expected_output": c["expected_output"]}
                 for c in all_cases
@@ -201,7 +274,7 @@ def verify_on_disk_coding_package(
                 import inspect
 
                 run_kwargs: dict[str, Any] = {
-                    "language": lang,
+                    "language": effective_lang,
                     "source_code": sol_code,
                     "test_cases": exec_cases,
                 }
@@ -211,6 +284,8 @@ def verify_on_disk_coding_package(
                 except (ValueError, TypeError):
                     pass
                 report = run_against_test_cases(**run_kwargs)
+            except DockerNotAvailableError:
+                continue
             except Exception as exc:
                 diagnostics.append(f"[{rel_label}] Sandbox execution error: {exc}")
                 continue
@@ -267,6 +342,7 @@ def run_coding_generation(
 
     os.environ["CREWAI_STORAGE_DIR"] = f".db/{subject}"
 
+    from klyra.crews.base_task import set_active_crew_inputs
     from klyra.crews.coding_problem_crew.coding_problem_crew import CodingProblemCrew
     from klyra.services.skill_service import build_skill_prompt_inputs, load_subject_skill
     from klyra.utils import fs
@@ -301,6 +377,7 @@ def run_coding_generation(
         "notes": notes or "(none)",
         **build_skill_prompt_inputs(subject),
     }
+    set_active_crew_inputs(inputs)
     result = CodingProblemCrew().crew().kickoff(inputs=inputs)
 
     # Post-crew deterministic verification & automatic rewrite-and-rerun loop
@@ -335,6 +412,7 @@ def run_coding_revision(
     notes: str | None = None,
     max_rewrite_attempts: int = 1,
 ) -> Any:
+    from klyra.crews.base_task import set_active_crew_inputs
     from klyra.crews.coding_revision_crew.coding_revision_crew import CodingRevisionCrew
     from klyra.services.skill_service import build_skill_prompt_inputs, load_subject_skill
     from klyra.utils import fs
@@ -373,14 +451,24 @@ def run_coding_revision(
     pkg_root = fs.coding_package_dir(subject, name)
     testcases_md = _read("testcases")
     if pkg_root.exists():
-        disk_pub = _collect_test_cases_from_dir(pkg_root / "public", "public")
-        disk_priv = _collect_test_cases_from_dir(pkg_root / "private", "private")
-        if not disk_pub and (pkg_root / "problem-1").is_dir():
-            disk_pub = _collect_test_cases_from_dir(pkg_root / "problem-1" / "public", "public")
-            disk_priv = _collect_test_cases_from_dir(pkg_root / "problem-1" / "private", "private")
-        if disk_pub or disk_priv:
+        all_disk_cases: list[dict[str, str]] = []
+        sub_dirs = sorted(
+            d for d in pkg_root.iterdir() if d.is_dir() and d.name.startswith("problem-")
+        )
+        if sub_dirs:
+            for sdir in sub_dirs:
+                all_disk_cases.extend(
+                    _collect_test_cases_from_dir(sdir / "public", f"{sdir.name}/public")
+                )
+                all_disk_cases.extend(
+                    _collect_test_cases_from_dir(sdir / "private", f"{sdir.name}/private")
+                )
+        else:
+            all_disk_cases.extend(_collect_test_cases_from_dir(pkg_root / "public", "public"))
+            all_disk_cases.extend(_collect_test_cases_from_dir(pkg_root / "private", "private"))
+        if all_disk_cases:
             disk_lines = ["\n\n## On-Disk Test Case Files (`public/` & `private/`)"]
-            for c in disk_pub + disk_priv:
+            for c in all_disk_cases:
                 disk_lines.append(
                     f"### {c['label']}\n**Input (`input.txt`):**\n```text\n{c['input'].rstrip()}\n```\n"
                     f"**Expected Output (`output.txt`):**\n```text\n{c['expected_output'].rstrip()}\n```"
@@ -399,9 +487,10 @@ def run_coding_revision(
         "manual_instructions": notes or "(none - just fix what the automated review flagged)",
         **build_skill_prompt_inputs(subject),
     }
-    
+
     import shutil
 
+    set_active_crew_inputs(inputs)
     with fs.crewai_storage_context(f".memories/{subject}/{slug}"):
         result = CodingRevisionCrew().crew().kickoff(inputs=inputs)
 

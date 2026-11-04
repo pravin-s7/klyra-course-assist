@@ -475,43 +475,64 @@ function updateToolStatus(toolName, status, counter = 1, extraMessage = '', auto
 }
 
 function addFileCard(name, url, fileType) {
+    const ext = (fileType || '').toLowerCase();
+    const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'];
+    const isImage = imageExts.includes(ext);
+
     const icons = {
         '.md': '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>',
         '.pdf': '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
         '.py': '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><polyline points="8 13 10 15 16 9"></polyline></svg>',
     };
-    const icon = icons[fileType] || '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>';
+    const imgIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>';
+    const icon = isImage ? imgIcon : (icons[ext] || '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>');
 
     const div = document.createElement('div');
-    div.className = 'file-card';
+    div.className = isImage ? 'file-card file-card-image' : 'file-card';
 
-    const previewable = ['.md', '.txt', '.tex', '.py', '.json', '.yaml', '.yml'];
-    const canPreview = previewable.includes(fileType);
+    const previewable = ['.md', '.txt', '.tex', '.py', '.json', '.yaml', '.yml', ...imageExts];
+    const canPreview = previewable.includes(ext);
 
     const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
     const downloadSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
 
     div.innerHTML = `
-        <div style="display: flex; align-items: center; gap: 12px; cursor: default;">
-            <span class="file-icon" style="display:flex; align-items:center; color: var(--text-muted);">${icon}</span>
-            <div class="file-info">
-                <span class="file-name">${name}</span>
-                <span class="file-type">${(fileType || '').replace('.', '')}</span>
+        <div class="file-card-row" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+            <div style="display: flex; align-items: center; gap: 12px; cursor: default;">
+                <span class="file-icon" style="display:flex; align-items:center; color: var(--text-muted);">${icon}</span>
+                <div class="file-info">
+                    <span class="file-name">${escapeHtml(name)}</span>
+                    <span class="file-type">${ext.replace('.', '')}</span>
+                </div>
+            </div>
+            <div class="file-card-actions">
+                ${canPreview ? `<a href="#" class="preview-link" title="${isImage ? 'Toggle Image Display' : 'Preview'}" style="display:flex; align-items:center;">${eyeSvg}</a>` : ''}
+                <a href="${url}?download=true" download="${escapeHtml(name)}" title="Download" style="display:flex; align-items:center;">${downloadSvg}</a>
             </div>
         </div>
-        <div class="file-card-actions">
-            ${canPreview ? `<a href="#" class="preview-link" title="Preview" style="display:flex; align-items:center;">${eyeSvg}</a>` : ''}
-            <a href="${url}?preview=false" download="${name}" title="Download" style="display:flex; align-items:center;">${downloadSvg}</a>
+        ${isImage ? `
+        <div class="file-card-image-preview">
+            <img src="${url}" alt="${escapeHtml(name)}" loading="lazy" title="Click to enlarge" />
         </div>
+        ` : ''}
     `;
 
     if (canPreview) {
         div.querySelector('.preview-link').addEventListener('click', async (e) => {
             e.preventDefault();
+            if (isImage) {
+                const imgWrap = div.querySelector('.file-card-image-preview');
+                if (imgWrap) {
+                    imgWrap.style.display = imgWrap.style.display === 'none' ? 'flex' : 'none';
+                } else {
+                    openImageLightbox(url, name);
+                }
+                return;
+            }
             try {
                 const resp = await fetch(url + '?preview=true');
                 const content = await resp.text();
-                addDocPreview(name, content, div);
+                addDocPreview(name, content, div, url);
             } catch (err) {
                 window.open(url, '_blank');
             }
@@ -521,23 +542,56 @@ function addFileCard(name, url, fileType) {
     messages.appendChild(div);
 }
 
-function addDocPreview(filename, content, insertAfterEl = null) {
+function addDocPreview(filename, content, insertAfterEl = null, fileUrl = '') {
     if (insertAfterEl && insertAfterEl.nextSibling && insertAfterEl.nextSibling.classList && insertAfterEl.nextSibling.classList.contains('doc-preview')) {
         insertAfterEl.nextSibling.remove();
         return;
     }
+    const isMarkdown = (filename || '').toLowerCase().endsWith('.md');
     const div = document.createElement('div');
     div.className = 'doc-preview';
     div.innerHTML = `
         <div class="doc-preview-header">
             <span style="display:flex; align-items:center;">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-                ${filename}
+                ${escapeHtml(filename)}
             </span>
-            <button class="action-btn" onclick="this.closest('.doc-preview').remove()">✕ Close</button>
+            <div style="display:flex; align-items:center; gap:8px;">
+                ${isMarkdown ? `<button class="action-btn toggle-raw-btn" title="Switch between rendered view (with images & math) and raw Markdown">Raw</button>` : ''}
+                <button class="action-btn" onclick="this.closest('.doc-preview').remove()">✕ Close</button>
+            </div>
         </div>
-        <div class="doc-preview-content">${escapeHtml(content)}</div>
+        <div class="doc-preview-content ${isMarkdown ? 'markdown-rendered' : ''}"></div>
     `;
+
+    const contentEl = div.querySelector('.doc-preview-content');
+    if (isMarkdown) {
+        let showingRaw = false;
+        const renderView = () => {
+            if (showingRaw) {
+                contentEl.classList.remove('markdown-rendered');
+                contentEl.innerHTML = escapeHtml(content);
+            } else {
+                contentEl.classList.add('markdown-rendered');
+                contentEl.innerHTML = renderMarkdown(content, fileUrl);
+                if (window.MathJax && window.MathJax.typesetPromise) {
+                    MathJax.typesetPromise([contentEl]).catch(err => console.log(err));
+                }
+            }
+        };
+        renderView();
+        const toggleBtn = div.querySelector('.toggle-raw-btn');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                showingRaw = !showingRaw;
+                toggleBtn.textContent = showingRaw ? 'Rendered' : 'Raw';
+                renderView();
+            });
+        }
+    } else {
+        contentEl.innerHTML = escapeHtml(content);
+    }
+
     if (insertAfterEl && insertAfterEl.parentNode) {
         insertAfterEl.parentNode.insertBefore(div, insertAfterEl.nextSibling);
     } else {
@@ -566,15 +620,132 @@ function scrollToBottom() {
     }
 }
 
-// ── Markdown rendering (basic) ────────────────────────────────────
-function renderMarkdown(text) {
+// ── Markdown & Image rendering ────────────────────────────────────
+function resolveAssetUrl(rawUrl, baseUrl = '') {
+    if (!rawUrl) return rawUrl;
+    let url = rawUrl.trim();
+    if (/^(https?:|data:|blob:)/i.test(url)) return url;
+
+    // Extract subject from baseUrl like '/files/<subject>/generated/...' if available
+    let subject = '';
+    const baseMatch = (baseUrl || '').match(/^\/files\/([^/]+)\//);
+    if (baseMatch) {
+        subject = baseMatch[1];
+    }
+
+    // 1. 'docs/<subject>/.assets/...' or 'docs/<subject>/assets/...'
+    const docsMatch = url.match(/^\/?docs\/([^/]+)\/\.?assets\/(.+)$/);
+    if (docsMatch) {
+        return `/files/${docsMatch[1]}/.assets/${docsMatch[2]}`;
+    }
+
+    // 2. '/files/<subject>/assets/...' (missing dot on .assets)
+    const filesAssetsMatch = url.match(/^\/files\/([^/]+)\/assets\/(.+)$/);
+    if (filesAssetsMatch) {
+        return `/files/${filesAssetsMatch[1]}/.assets/${filesAssetsMatch[2]}`;
+    }
+
+    // 3. Relative '../.assets/...', './.assets/...', '.assets/...', or '../assets/...'
+    const relAssetsMatch = url.match(/^(?:\.\.\/|\.\/)*\.?assets\/(.+)$/);
+    if (relAssetsMatch) {
+        if (subject) {
+            return `/files/${subject}/.assets/${relAssetsMatch[1]}`;
+        }
+        return `/.assets/${relAssetsMatch[1]}`;
+    }
+
+    // 4. '<subject>/.assets/...' without leading '/files/'
+    const subjAssetsMatch = url.match(/^([a-zA-Z0-9_-]+)\/\.assets\/(.+)$/);
+    if (subjAssetsMatch) {
+        return `/files/${subjAssetsMatch[1]}/.assets/${subjAssetsMatch[2]}`;
+    }
+
+    return url;
+}
+
+function normalizeMarkdownImages(text, baseUrl = '') {
+    if (!text) return '';
+    // Try to infer subject from text if baseUrl didn't provide it
+    let inferredBase = baseUrl;
+    if (!inferredBase) {
+        const subjMatch = text.match(/\/files\/([a-zA-Z0-9_-]+)\/|docs\/([a-zA-Z0-9_-]+)\//);
+        if (subjMatch) {
+            const s = subjMatch[1] || subjMatch[2];
+            inferredBase = `/files/${s}/`;
+        }
+    }
+
+    // 1. Rewrite ![alt](url) image paths
+    let out = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, rawUrl) => {
+        const resolved = resolveAssetUrl(rawUrl, inferredBase);
+        return `![${alt}](${resolved})`;
+    });
+
+    // 2. Convert non-image markdown links [label](url.png) that point to image files into inline images
+    out = out.replace(/(?<!!)\[([^\]]+)\]\(([^)]+\.(?:png|jpg|jpeg|gif|svg|webp)(?:\?[^)]*)?)\)/gi, (match, label, rawUrl) => {
+        const resolved = resolveAssetUrl(rawUrl, inferredBase);
+        return `![${label}](${resolved})`;
+    });
+
+    return out;
+}
+
+function renderMarkdown(text, baseUrl = '') {
     if (!text) return '';
     try {
-        return marked.parse(text);
+        const normalized = normalizeMarkdownImages(text, baseUrl);
+        return marked.parse(normalized);
     } catch (e) {
         console.error("Markdown parsing failed:", e);
         return escapeHtml(text);
     }
+}
+
+function openImageLightbox(src, altText = '') {
+    let overlay = document.getElementById('imageLightboxOverlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'imageLightboxOverlay';
+        overlay.className = 'image-lightbox-overlay';
+        overlay.innerHTML = `
+            <div class="image-lightbox-content">
+                <button class="image-lightbox-close" title="Close (Esc)">✕</button>
+                <img class="image-lightbox-img" src="" alt="" />
+                <div class="image-lightbox-caption"></div>
+            </div>
+        `;
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay || e.target.classList.contains('image-lightbox-close')) {
+                overlay.style.display = 'none';
+            }
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && overlay.style.display === 'flex') {
+                overlay.style.display = 'none';
+            }
+        });
+        document.body.appendChild(overlay);
+    }
+    const img = overlay.querySelector('.image-lightbox-img');
+    const cap = overlay.querySelector('.image-lightbox-caption');
+    img.src = src;
+    img.alt = altText || '';
+    cap.textContent = altText || '';
+    overlay.style.display = 'flex';
+}
+
+// Click-to-zoom delegation for any rendered image inside chat messages or previews
+if (messages) {
+    messages.addEventListener('click', (e) => {
+        const target = e.target;
+        if (target && target.tagName === 'IMG' && (
+            target.closest('.message-bubble') ||
+            target.closest('.doc-preview-content') ||
+            target.closest('.file-card-image-preview')
+        )) {
+            openImageLightbox(target.src, target.alt || '');
+        }
+    });
 }
 
 function escapeHtml(text) {

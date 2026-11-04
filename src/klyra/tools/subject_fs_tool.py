@@ -49,7 +49,7 @@ def write_under_generated(subject: str, relative_path: str, content: str) -> Pat
     dest = resolve_under_generated(subject, relative_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(content if content is not None else "")
-    if dest.name in _ALLOWED_SCRIPT_NAMES or dest.suffix in {".sh", ".py"}:
+    if dest.name in _ALLOWED_SCRIPT_NAMES or dest.suffix in {".sh", ".py", ".sed", ".awk"}:
         dest.chmod(dest.stat().st_mode | 0o111)
     return dest
 
@@ -73,10 +73,33 @@ def _write_test_bank(folder: Path, cases: list[TestCaseFiles]) -> list[str]:
     return written
 
 
+def _normalize_language_key(language: str) -> str:
+    key = (language or "").strip().lower()
+    aliases = {
+        "c++": "cpp",
+        "g++": "cpp",
+        "cxx": "cpp",
+        "py": "python",
+        "python3": "python",
+        "sh": "bash",
+        "shell": "bash",
+        "sed": "sed",
+        "awk": "awk",
+        "gawk": "gawk",
+        "sqlite": "sql",
+        "sqlite3": "sql",
+        "postgres": "postgresql",
+        "pgsql": "postgresql",
+        "jdk": "java",
+        "openjdk": "java",
+    }
+    return aliases.get(key, key)
+
+
 def default_evaluation_script(language: str) -> tuple[str, str]:
     """Generic stdin/stdout runner. Agent should pass a custom script when
     the problem uses a named file (e.g. access.log) instead of stdin."""
-    key = language.strip().lower()
+    key = _normalize_language_key(language)
     if key == "python":
         return "evaluation_script.py", _PYTHON_EVAL
     if key == "python-db":
@@ -84,28 +107,68 @@ def default_evaluation_script(language: str) -> tuple[str, str]:
     if key == "java":
         return "evaluation_script.sh", _JAVA_EVAL
     if key in {"c", "cpp"}:
-        return "evaluation_script.sh", _C_EVAL.format(compiler="gcc" if key == "c" else "g++")
-    if key in {"sql", "sqlite"}:
+        is_c = key == "c"
+        return "evaluation_script.sh", _C_EVAL.format(
+            compiler="gcc" if is_c else "g++ -std=c++17",
+            ext="c" if is_c else "cpp",
+        )
+    if key == "sql":
         return "evaluation_script.sh", _SQL_EVAL
-    if key in {"postgresql", "postgres"}:
+    if key == "postgresql":
         return "evaluation_script.sh", _POSTGRES_EVAL
-    return "evaluation_script.sh", _BASH_EVAL
+    runner = key if key in {"sed", "awk", "gawk"} else "bash"
+    return "evaluation_script.sh", _BASH_EVAL.replace("__DEFAULT_RUNNER__", runner)
 
 
 _BASH_EVAL = r"""#!/usr/bin/env bash
-# Usage: ./evaluation_script.sh [path/to/student_solution.sh]
+# Usage: ./evaluation_script.sh [path/to/student_solution.{sh,sed,awk,gawk}]
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
-SOLUTION="$ROOT/solution.sh"
+DEFAULT_RUNNER="__DEFAULT_RUNNER__"
+SOLUTION=""
+for cand in "$ROOT/solution.sh" "$ROOT/script.sh" "$ROOT/solution.sed" "$ROOT/script.sed" "$ROOT/solution.gawk" "$ROOT/script.gawk" "$ROOT/solution.awk" "$ROOT/script.awk"; do
+  if [[ -f "$cand" ]]; then
+    SOLUTION="$cand"
+    break
+  fi
+done
+[[ -z "$SOLUTION" ]] && SOLUTION="$ROOT/solution.sh"
 for arg in "$@"; do
   if [[ "$arg" != --* ]]; then
     SOLUTION="$arg"
     break
   fi
 done
+run_solution_on_file() {
+  local sol="$1"
+  local infile="$2"
+  local first_line=""
+  [[ -f "$sol" ]] && IFS= read -r first_line < "$sol" || true
+  if [[ "$sol" == *.sed ]] || [[ "$first_line" == "#!"*sed* ]] || [[ "$DEFAULT_RUNNER" == "sed" && "$sol" != *.sh && "$sol" != *.awk && "$sol" != *.gawk ]]; then
+    sed -Ef "$sol" < "$infile" 2>/dev/null || true
+  elif [[ "$sol" == *.gawk ]] || [[ "$first_line" == "#!"*gawk* ]]; then
+    gawk -f "$sol" < "$infile" 2>/dev/null || true
+  elif [[ "$sol" == *.awk ]] || [[ "$first_line" == "#!"*awk* ]]; then
+    if [[ "$DEFAULT_RUNNER" == "gawk" ]]; then
+      gawk -f "$sol" < "$infile" 2>/dev/null || true
+    else
+      awk -f "$sol" < "$infile" 2>/dev/null || true
+    fi
+  elif [[ "$DEFAULT_RUNNER" == "gawk" ]]; then
+    gawk -f "$sol" < "$infile" 2>/dev/null || true
+  elif [[ "$DEFAULT_RUNNER" == "awk" ]]; then
+    awk -f "$sol" < "$infile" 2>/dev/null || true
+  else
+    bash "$sol" < "$infile" 2>/dev/null || true
+  fi
+}
 fail=0
 passed=0
 total=0
+pub_passed=0
+pub_total=0
+priv_passed=0
+priv_total=0
 run_bank() {
   local kind=$1
   local dir="$ROOT/$kind"
@@ -113,31 +176,49 @@ run_bank() {
   for tc in "$dir"/test_case_*; do
     [[ -d "$tc" ]] || continue
     total=$((total + 1))
+    if [[ "$kind" == "public" ]]; then pub_total=$((pub_total + 1)); else priv_total=$((priv_total + 1)); fi
     local got
-    got=$(bash "$SOLUTION" < "$tc/input.txt" 2>/dev/null || true)
+    got=$(run_solution_on_file "$SOLUTION" "$tc/input.txt")
     local exp
     exp=$(cat "$tc/output.txt")
     if [[ "$(printf '%s' "$got" | sed 's/[[:space:]]*$//')" == "$(printf '%s' "$exp" | sed 's/[[:space:]]*$//')" ]]; then
       echo "PASS $(basename "$tc") ($kind)"
       passed=$((passed + 1))
+      if [[ "$kind" == "public" ]]; then pub_passed=$((pub_passed + 1)); else priv_passed=$((priv_passed + 1)); fi
     else
       echo "FAIL $(basename "$tc") ($kind)"
+      diff --color=always <(printf '%s\n' "$got" | sed 's/[[:space:]]*$//') <(printf '%s\n' "$exp" | sed 's/[[:space:]]*$//') || true
       fail=1
     fi
   done
 }
 run_bank public
 run_bank private
+echo "Public: $pub_passed/$pub_total passed"
+echo "Private: $priv_passed/$priv_total passed"
 if [[ $fail -eq 0 ]]; then
   echo "ALL PASSED ($passed/$total)"
+else
+  echo "$passed/$total passed"
 fi
 exit $fail
 """
 
 _PYTHON_EVAL = r'''#!/usr/bin/env python3
 """Usage: python3 evaluation_script.py [path/to/student_solution.py]"""
-import subprocess, sys
+import subprocess, sys, tempfile
 from pathlib import Path
+
+def show_diff(got: str, exp: str) -> None:
+    with tempfile.NamedTemporaryFile("w", delete=False) as fg, tempfile.NamedTemporaryFile("w", delete=False) as fe:
+        fg.write(got + "\n")
+        fe.write(exp + "\n")
+        g_path, e_path = fg.name, fe.name
+    try:
+        subprocess.run(["diff", "--color=always", g_path, e_path])
+    finally:
+        Path(g_path).unlink(missing_ok=True)
+        Path(e_path).unlink(missing_ok=True)
 
 root = Path(__file__).resolve().parent
 pos_args = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -145,6 +226,7 @@ solution = pos_args[0] if pos_args else str(root / "solution.py")
 fail = 0
 passed = 0
 total = 0
+counts = {"public": [0, 0], "private": [0, 0]}
 for kind in ("public", "private"):
     bank = root / kind
     if not bank.is_dir():
@@ -153,25 +235,43 @@ for kind in ("public", "private"):
         if not tc.is_dir():
             continue
         total += 1
+        counts[kind][1] += 1
         inp = (tc / "input.txt").read_text()
-        exp = (tc / "output.txt").read_text().rstrip()
+        exp = "\n".join(line.rstrip() for line in (tc / "output.txt").read_text().rstrip().splitlines())
         proc = subprocess.run([sys.executable, solution], input=inp, text=True, capture_output=True, cwd=str(root))
-        got = (proc.stdout or "").rstrip()
+        got = "\n".join(line.rstrip() for line in (proc.stdout or "").rstrip().splitlines())
         status = "PASS" if got == exp and proc.returncode == 0 else "FAIL"
+        print(f"{status} {tc.name} ({kind})", flush=True)
         if status == "FAIL":
             fail = 1
+            show_diff(got, exp)
         else:
             passed += 1
-        print(f"{status} {tc.name} ({kind})")
+            counts[kind][0] += 1
+print(f"Public: {counts['public'][0]}/{counts['public'][1]} passed")
+print(f"Private: {counts['private'][0]}/{counts['private'][1]} passed")
 if fail == 0:
     print(f"ALL PASSED ({passed}/{total})")
+else:
+    print(f"{passed}/{total} passed")
 sys.exit(fail)
 '''
 
 _PYTHON_DB_EVAL = r'''#!/usr/bin/env python3
 """Usage: python3 evaluation_script.py [path/to/student_solution.py]"""
-import os, shutil, subprocess, sys
+import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
+
+def show_diff(got: str, exp: str) -> None:
+    with tempfile.NamedTemporaryFile("w", delete=False) as fg, tempfile.NamedTemporaryFile("w", delete=False) as fe:
+        fg.write(got + "\n")
+        fe.write(exp + "\n")
+        g_path, e_path = fg.name, fe.name
+    try:
+        subprocess.run(["diff", "--color=always", g_path, e_path])
+    finally:
+        Path(g_path).unlink(missing_ok=True)
+        Path(e_path).unlink(missing_ok=True)
 
 root = Path(__file__).resolve().parent
 pos_args = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -180,6 +280,7 @@ psql_bin = shutil.which("psql")
 fail = 0
 passed = 0
 total = 0
+counts = {"public": [0, 0], "private": [0, 0]}
 for kind in ("public", "private"):
     bank = root / kind
     if not bank.is_dir():
@@ -188,9 +289,10 @@ for kind in ("public", "private"):
         if not tc.is_dir():
             continue
         total += 1
+        counts[kind][1] += 1
         in_file = tc / "input.txt"
         inp = in_file.read_text()
-        exp = (tc / "output.txt").read_text().rstrip()
+        exp = "\n".join(line.rstrip() for line in (tc / "output.txt").read_text().rstrip().splitlines())
         if psql_bin and any(k in inp.upper() for k in ("CREATE TABLE", "INSERT INTO", "DROP TABLE", "\\COPY")):
             subprocess.run([psql_bin, "-U", os.environ.get("PGUSER", "postgres"), "-d", "postgres", "-q", "-f", str(in_file)], cwd=str(root), capture_output=True)
         env = dict(os.environ)
@@ -200,72 +302,134 @@ for kind in ("public", "private"):
         env.setdefault("PGPORT", "5432")
         env.setdefault("PGDATABASE", "postgres")
         proc = subprocess.run([sys.executable, solution], input=inp, text=True, capture_output=True, cwd=str(root), env=env)
-        got = (proc.stdout or "").rstrip()
+        got = "\n".join(line.rstrip() for line in (proc.stdout or "").rstrip().splitlines())
         status = "PASS" if got == exp and proc.returncode == 0 else "FAIL"
+        print(f"{status} {tc.name} ({kind})", flush=True)
         if status == "FAIL":
             fail = 1
+            show_diff(got, exp)
         else:
             passed += 1
-        print(f"{status} {tc.name} ({kind})")
+            counts[kind][0] += 1
+print(f"Public: {counts['public'][0]}/{counts['public'][1]} passed")
+print(f"Private: {counts['private'][0]}/{counts['private'][1]} passed")
 if fail == 0:
     print(f"ALL PASSED ({passed}/{total})")
+else:
+    print(f"{passed}/{total} passed")
 sys.exit(fail)
 '''
 
 _JAVA_EVAL = r"""#!/usr/bin/env bash
 set -uo pipefail
-SOLUTION=${1:?usage: evaluation_script.sh Solution.java}
 ROOT=$(cd "$(dirname "$0")" && pwd)
+SOLUTION="$ROOT/solution.java"
+for arg in "$@"; do
+  if [[ "$arg" != --* ]]; then
+    SOLUTION="$arg"
+    break
+  fi
+done
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 cp "$SOLUTION" "$WORKDIR/Solution.java"
-(cd "$WORKDIR" && javac Solution.java) || exit 2
+if command -v javac >/dev/null 2>&1; then
+  (cd "$WORKDIR" && javac Solution.java) || exit 2
+  RUN_CMD=(java Solution)
+else
+  RUN_CMD=(java Solution.java)
+fi
 fail=0
+passed=0
+total=0
+pub_passed=0
+pub_total=0
+priv_passed=0
+priv_total=0
 run_bank() {
-  local kind=$1 dir="$ROOT/$kind"
+  local kind=$1
+  local dir="$ROOT/$kind"
   [[ -d "$dir" ]] || return 0
   for tc in "$dir"/test_case_*; do
     [[ -d "$tc" ]] || continue
-    got=$(cd "$WORKDIR" && java Solution < "$tc/input.txt" 2>/dev/null || true)
+    total=$((total + 1))
+    if [[ "$kind" == "public" ]]; then pub_total=$((pub_total + 1)); else priv_total=$((priv_total + 1)); fi
+    got=$(cd "$WORKDIR" && "${RUN_CMD[@]}" < "$tc/input.txt" 2>/dev/null || true)
     exp=$(cat "$tc/output.txt")
     if [[ "$(printf '%s' "$got" | sed 's/[[:space:]]*$//')" == "$(printf '%s' "$exp" | sed 's/[[:space:]]*$//')" ]]; then
       echo "PASS $(basename "$tc") ($kind)"
+      passed=$((passed + 1))
+      if [[ "$kind" == "public" ]]; then pub_passed=$((pub_passed + 1)); else priv_passed=$((priv_passed + 1)); fi
     else
       echo "FAIL $(basename "$tc") ($kind)"
+      diff --color=always <(printf '%s\n' "$got" | sed 's/[[:space:]]*$//') <(printf '%s\n' "$exp" | sed 's/[[:space:]]*$//') || true
       fail=1
     fi
   done
 }
 run_bank public
 run_bank private
+echo "Public: $pub_passed/$pub_total passed"
+echo "Private: $priv_passed/$priv_total passed"
+if [[ $fail -eq 0 ]]; then
+  echo "ALL PASSED ($passed/$total)"
+else
+  echo "$passed/$total passed"
+fi
 exit $fail
 """
 
 _C_EVAL = r"""#!/usr/bin/env bash
 set -uo pipefail
-SOLUTION=${{1:?usage: evaluation_script.sh solution.c}}
 ROOT=$(cd "$(dirname "$0")" && pwd)
-BIN=$(mktemp)
-trap 'rm -f "$BIN"' EXIT
+SOLUTION="$ROOT/solution.{ext}"
+for arg in "$@"; do
+  if [[ "$arg" != --* ]]; then
+    SOLUTION="$arg"
+    break
+  fi
+done
+WORKDIR=$(mktemp -d)
+BIN="$WORKDIR/solution"
+trap 'rm -rf "$WORKDIR"' EXIT
 {compiler} -O2 -o "$BIN" "$SOLUTION" -lm || exit 2
 fail=0
+passed=0
+total=0
+pub_passed=0
+pub_total=0
+priv_passed=0
+priv_total=0
 run_bank() {{
-  local kind=$1 dir="$ROOT/$kind"
+  local kind=$1
+  local dir="$ROOT/$kind"
   [[ -d "$dir" ]] || return 0
   for tc in "$dir"/test_case_*; do
     [[ -d "$tc" ]] || continue
+    total=$((total + 1))
+    if [[ "$kind" == "public" ]]; then pub_total=$((pub_total + 1)); else priv_total=$((priv_total + 1)); fi
     got=$("$BIN" < "$tc/input.txt" 2>/dev/null || true)
     exp=$(cat "$tc/output.txt")
     if [[ "$(printf '%s' "$got" | sed 's/[[:space:]]*$//')" == "$(printf '%s' "$exp" | sed 's/[[:space:]]*$//')" ]]; then
       echo "PASS $(basename "$tc") ($kind)"
+      passed=$((passed + 1))
+      if [[ "$kind" == "public" ]]; then pub_passed=$((pub_passed + 1)); else priv_passed=$((priv_passed + 1)); fi
     else
       echo "FAIL $(basename "$tc") ($kind)"
+      diff --color=always <(printf '%s\n' "$got" | sed 's/[[:space:]]*$//') <(printf '%s\n' "$exp" | sed 's/[[:space:]]*$//') || true
       fail=1
     fi
   done
 }}
 run_bank public
 run_bank private
+echo "Public: $pub_passed/$pub_total passed"
+echo "Private: $priv_passed/$priv_total passed"
+if [[ $fail -eq 0 ]]; then
+  echo "ALL PASSED ($passed/$total)"
+else
+  echo "$passed/$total passed"
+fi
 exit $fail
 """
 
@@ -282,6 +446,10 @@ done
 fail=0
 passed=0
 total=0
+pub_passed=0
+pub_total=0
+priv_passed=0
+priv_total=0
 run_sql() {
   local tc_input=$1 sol=$2
   if command -v sqlite3 >/dev/null 2>&1; then
@@ -311,47 +479,79 @@ run_bank() {
   for tc in "$dir"/test_case_*; do
     [[ -d "$tc" ]] || continue
     total=$((total + 1))
+    if [[ "$kind" == "public" ]]; then pub_total=$((pub_total + 1)); else priv_total=$((priv_total + 1)); fi
     got=$(run_sql "$tc/input.txt" "$SOLUTION")
     exp=$(cat "$tc/output.txt")
     if [[ "$(printf '%s' "$got" | sed 's/[[:space:]]*$//')" == "$(printf '%s' "$exp" | sed 's/[[:space:]]*$//')" ]]; then
       echo "PASS $(basename "$tc") ($kind)"
       passed=$((passed + 1))
+      if [[ "$kind" == "public" ]]; then pub_passed=$((pub_passed + 1)); else priv_passed=$((priv_passed + 1)); fi
     else
       echo "FAIL $(basename "$tc") ($kind)"
+      diff --color=always <(printf '%s\n' "$got" | sed 's/[[:space:]]*$//') <(printf '%s\n' "$exp" | sed 's/[[:space:]]*$//') || true
       fail=1
     fi
   done
 }
 run_bank public
 run_bank private
+echo "Public: $pub_passed/$pub_total passed"
+echo "Private: $priv_passed/$priv_total passed"
 if [[ $fail -eq 0 ]]; then
   echo "ALL PASSED ($passed/$total)"
+else
+  echo "$passed/$total passed"
 fi
 exit $fail
 """
 
 _POSTGRES_EVAL = r"""#!/usr/bin/env bash
 set -uo pipefail
-SOLUTION=${1:?usage: evaluation_script.sh solution.sql}
 ROOT=$(cd "$(dirname "$0")" && pwd)
+SOLUTION="$ROOT/solution.sql"
+for arg in "$@"; do
+  if [[ "$arg" != --* ]]; then
+    SOLUTION="$arg"
+    break
+  fi
+done
 fail=0
+passed=0
+total=0
+pub_passed=0
+pub_total=0
+priv_passed=0
+priv_total=0
 run_bank() {
-  local kind=$1 dir="$ROOT/$kind"
+  local kind=$1
+  local dir="$ROOT/$kind"
   [[ -d "$dir" ]] || return 0
   for tc in "$dir"/test_case_*; do
     [[ -d "$tc" ]] || continue
+    total=$((total + 1))
+    if [[ "$kind" == "public" ]]; then pub_total=$((pub_total + 1)); else priv_total=$((priv_total + 1)); fi
     got=$( (cat "$tc/input.txt"; echo ""; cat "$SOLUTION") | psql -U postgres -X -q -A -t 2>/dev/null || true )
     exp=$(cat "$tc/output.txt")
     if [[ "$(printf '%s' "$got" | sed 's/[[:space:]]*$//')" == "$(printf '%s' "$exp" | sed 's/[[:space:]]*$//')" ]]; then
       echo "PASS $(basename "$tc") ($kind)"
+      passed=$((passed + 1))
+      if [[ "$kind" == "public" ]]; then pub_passed=$((pub_passed + 1)); else priv_passed=$((priv_passed + 1)); fi
     else
       echo "FAIL $(basename "$tc") ($kind)"
+      diff --color=always <(printf '%s\n' "$got" | sed 's/[[:space:]]*$//') <(printf '%s\n' "$exp" | sed 's/[[:space:]]*$//') || true
       fail=1
     fi
   done
 }
 run_bank public
 run_bank private
+echo "Public: $pub_passed/$pub_total passed"
+echo "Private: $priv_passed/$priv_total passed"
+if [[ $fail -eq 0 ]]; then
+  echo "ALL PASSED ($passed/$total)"
+else
+  echo "$passed/$total passed"
+fi
 exit $fail
 """
 
@@ -419,8 +619,8 @@ class WriteCodingPackageInput(BaseModel):
     )
 
 
-def _infer_single_problem_package(subject: str, name: str, pkg_root: Path) -> bool:
-    """Return True if the active crew / on-disk metadata indicates a 1-problem set."""
+def _infer_expected_problem_count(subject: str, name: str, pkg_root: Path) -> int | None:
+    """Return the expected number of problems for `(subject, name)`, or None if unknown."""
     try:
         from klyra.crews.base_task import get_active_crew_inputs
 
@@ -428,12 +628,16 @@ def _infer_single_problem_package(subject: str, name: str, pkg_root: Path) -> bo
     except Exception:
         active_inputs = {}
 
-    raw_nq = active_inputs.get("num_questions")
-    if raw_nq is not None and str(raw_nq).strip().isdigit():
-        return int(str(raw_nq).strip()) == 1
-
-    if (pkg_root / "problem-2").exists():
-        return False
+    active_subj = fs.slugify(str(active_inputs.get("subject") or ""))
+    active_name = fs.slugify(str(active_inputs.get("name") or ""))
+    req_subj = fs.slugify(subject)
+    req_name = fs.slugify(name)
+    if (not active_subj or active_subj == req_subj) and (not active_name or active_name == req_name):
+        raw_nq = active_inputs.get("num_questions")
+        if raw_nq is not None and str(raw_nq).strip().isdigit():
+            val = int(str(raw_nq).strip())
+            if val > 0:
+                return val
 
     slug = fs.slugify(name)
     coding_dir = fs.generated_dir(subject) / "coding"
@@ -450,16 +654,52 @@ def _infer_single_problem_package(subject: str, name: str, pkg_root: Path) -> bo
                 data = json.loads(candidate.read_text(encoding="utf-8"))
                 items = data.get("problems") or data.get("validated_problems") or []
                 if isinstance(items, list) and len(items) > 0:
-                    return len(items) == 1
+                    return len(items)
             except Exception:
                 pass
+
+    if (pkg_root / "problem-2").exists():
+        return max(2, len([p for p in pkg_root.glob("problem-*") if p.is_dir()]))
 
     # If root already has public/ or README.md and there is no problem-2, treat as single-problem
     if ((pkg_root / "public").exists() or (pkg_root / "README.md").exists()) and not (
         pkg_root / "problem-2"
     ).exists():
-        return True
-    return False
+        return 1
+    return None
+
+
+def _infer_single_problem_package(subject: str, name: str, pkg_root: Path) -> bool:
+    """Return True if the active crew / on-disk metadata indicates a 1-problem set."""
+    return _infer_expected_problem_count(subject, name, pkg_root) == 1
+
+
+def _infer_problem_subdir_from_readme(subject: str, name: str, readme: str) -> str:
+    """Infer `problem-<N>` from the student README heading or sidecar problem titles."""
+    import json
+    import re
+
+    m = re.search(r"#+\s*Problem\s*(\d+)\b", readme or "", re.IGNORECASE)
+    if m:
+        return f"problem-{int(m.group(1))}"
+
+    slug = fs.slugify(name)
+    coding_dir = fs.generated_dir(subject) / "coding"
+    for candidate in (
+        coding_dir / f"{slug}-problems-revised.json",
+        coding_dir / f"{slug}-problems.json",
+    ):
+        if candidate.exists():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                for idx, item in enumerate(data.get("problems") or [], start=1):
+                    title = str(item.get("title") or "").strip()
+                    pnum = int(item.get("problem_number") or idx)
+                    if title and title.lower() in (readme or "").lower():
+                        return f"problem-{pnum}"
+            except Exception:
+                pass
+    return "problem-1"
 
 
 class WriteCodingPackageTool(BaseTool):
@@ -500,17 +740,20 @@ class WriteCodingPackageTool(BaseTool):
         except Exception:
             active_inputs = {}
 
-        active_lang = str(active_inputs.get("language") or "").strip().lower()
-        lang_key = (language or active_lang or "python").strip().lower()
+        active_lang = _normalize_language_key(str(active_inputs.get("language") or ""))
+        lang_key = _normalize_language_key(language or active_lang or "python")
         if lang_key == "python" and active_lang == "python-db":
             lang_key = "python-db"
 
         pkg_root = fs.coding_package_dir(subject, name)
         sub = fs.slugify(problem_subdir) if problem_subdir else ""
-        is_single = _infer_single_problem_package(subject, name, pkg_root)
+        expected_count = _infer_expected_problem_count(subject, name, pkg_root)
+        is_single = expected_count == 1
 
         if sub in {"", "problem-1", "problem1"} and is_single:
             sub = ""
+        elif not sub and expected_count is not None and expected_count > 1:
+            sub = _infer_problem_subdir_from_readme(subject, name, readme)
 
         if sub:
             pkg = pkg_root / sub
@@ -543,7 +786,17 @@ class WriteCodingPackageTool(BaseTool):
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "README.md").write_text(readme or "")
 
+        effective_lang = lang_key
         if reference_solution:
+            if lang_key in {"bash", "sed", "awk", "gawk"}:
+                try:
+                    from klyra.tools.code_execution_tool import detect_shell_script_dialect
+
+                    effective_lang = detect_shell_script_dialect(reference_solution, lang_key)
+                except Exception:
+                    effective_lang = lang_key
+                for stale_ext in (".sh", ".sed", ".awk", ".gawk"):
+                    (pkg / f"solution{stale_ext}").unlink(missing_ok=True)
             ext_map = {
                 "python": ".py",
                 "python-db": ".py",
@@ -551,12 +804,15 @@ class WriteCodingPackageTool(BaseTool):
                 "c": ".c",
                 "cpp": ".cpp",
                 "bash": ".sh",
+                "sed": ".sed",
+                "awk": ".awk",
+                "gawk": ".awk",
                 "sql": ".sql",
                 "sqlite": ".sql",
                 "postgresql": ".sql",
                 "postgres": ".sql",
             }
-            ext = ext_map.get(lang_key, ".txt")
+            ext = ext_map.get(effective_lang, ".txt")
             (pkg / f"solution{ext}").write_text(reference_solution)
 
         def _as_cases(raw: list | None) -> list[TestCaseFiles]:
@@ -583,7 +839,7 @@ class WriteCodingPackageTool(BaseTool):
         public_written = _write_test_bank(pkg / "public", _as_cases(public_tests))
         private_written = _write_test_bank(pkg / "private", _as_cases(private_tests))
 
-        default_name, default_body = default_evaluation_script(lang_key)
+        default_name, default_body = default_evaluation_script(effective_lang)
         if evaluation_script is None:
             script_name = default_name
         else:

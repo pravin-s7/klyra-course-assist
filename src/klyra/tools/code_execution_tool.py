@@ -43,7 +43,7 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 DEFAULT_TIMEOUT_SECONDS = 5
-COMPILE_TIMEOUT_SECONDS = 30
+COMPILE_TIMEOUT_SECONDS = 120
 MEMORY_LIMIT = "256m"
 CPU_LIMIT = "1"
 PIDS_LIMIT = "64"
@@ -72,7 +72,7 @@ LANGUAGE_RUNNERS: dict[str, LanguageRunner] = {
         run_cmd=["python3", "solution.py"],
     ),
     "java": LanguageRunner(
-        image="eclipse-temurin:21-jdk-slim",
+        image="eclipse-temurin:21-jdk",
         filename="Solution.java",
         compile_cmd=["javac", "Solution.java"],
         run_cmd=["java", "Solution"],
@@ -94,6 +94,24 @@ LANGUAGE_RUNNERS: dict[str, LanguageRunner] = {
         filename="solution.sh",
         compile_cmd=None,
         run_cmd=["bash", "solution.sh"],
+    ),
+    "sed": LanguageRunner(
+        image=BASH_RUNNER_IMAGE,
+        filename="solution.sed",
+        compile_cmd=None,
+        run_cmd=["sed", "-Ef", "solution.sed"],
+    ),
+    "awk": LanguageRunner(
+        image=BASH_RUNNER_IMAGE,
+        filename="solution.awk",
+        compile_cmd=None,
+        run_cmd=["awk", "-f", "solution.awk"],
+    ),
+    "gawk": LanguageRunner(
+        image=BASH_RUNNER_IMAGE,
+        filename="solution.awk",
+        compile_cmd=None,
+        run_cmd=["gawk", "-f", "solution.awk"],
     ),
     "sql": LanguageRunner(
         image=BASH_RUNNER_IMAGE,
@@ -124,11 +142,125 @@ LANGUAGE_RUNNERS: dict[str, LanguageRunner] = {
 }
 
 
+_LANGUAGE_ALIASES: dict[str, str] = {
+    "c++": "cpp",
+    "g++": "cpp",
+    "cxx": "cpp",
+    "py": "python",
+    "python3": "python",
+    "sh": "bash",
+    "shell": "bash",
+    "sed": "sed",
+    "awk": "awk",
+    "gawk": "gawk",
+    "sqlite": "sql",
+    "sqlite3": "sql",
+    "postgres": "postgresql",
+    "pgsql": "postgresql",
+    "jdk": "java",
+    "openjdk": "java",
+}
+
+
+def detect_shell_script_dialect(source_code: str, default_lang: str = "bash") -> str:
+    """Detect whether a Linux/shell script is pure `sed` (`sed -Ef`), pure
+    `gawk` (`gawk -f`), pure `awk` (`awk -f`), or `bash` (`bash`)."""
+    raw_lang = (default_lang or "bash").strip().lower()
+    if raw_lang in ("gawk", "awk", "sed"):
+        norm_default = raw_lang
+    else:
+        norm_default = "bash"
+
+    code = (source_code or "").strip()
+    if not code:
+        return norm_default
+
+    if code.startswith("```"):
+        lines = code.splitlines()
+        fence_lang = lines[0][3:].strip().lower()
+        if fence_lang in ("gawk", "awk", "sed"):
+            norm_default = fence_lang
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            code = "\n".join(lines[1:-1]).strip()
+
+    lines = [ln.strip() for ln in code.splitlines() if ln.strip()]
+    if not lines:
+        return norm_default
+
+    first = lines[0].lower()
+    if first.startswith("#!"):
+        if "gawk" in first:
+            return "gawk"
+        if "awk" in first:
+            return "awk"
+        if "sed" in first:
+            return "sed"
+        if "bash" in first or "/sh" in first or "env sh" in first:
+            return "bash"
+
+    non_comment = [ln for ln in lines if not ln.startswith("#")]
+    if not non_comment:
+        return norm_default
+
+    body = "\n".join(non_comment)
+
+    # Unmistakable bash syntax: shell invocations of sed/awk/grep or bash keywords `then`/`fi`/`do`/`done`/`esac`
+    bash_syntax_re = re.compile(
+        r"(?:^\s*(?:sed|g?awk|grep|egrep|fgrep|cat|echo|read|find|sort|uniq|cut|tr|paste|wc|head|tail|chmod|mkdir|rm|cp|mv)\s+)"
+        r"|\b(?:then|fi|do|done|esac)\b",
+        re.MULTILINE,
+    )
+    has_bash_syntax = bool(bash_syntax_re.search(body))
+
+    # GNU Awk (`gawk`) specific extensions (`gensub`, `asort`, `asorti`, `patsplit`, `systime`, `strftime`, `mktime`, `PROCINFO`, `IGNORECASE`, `FPAT`, `BEGINFILE`, `ENDFILE`)
+    gawk_ext_re = re.compile(
+        r"\b(?:gensub|asort|asorti|patsplit|systime|strftime|mktime|and|or|xor|lshift|rshift)\s*\("
+        r"|\b(?:PROCINFO|IGNORECASE|FIELDWIDTHS|FPAT|RT|BEGINFILE|ENDFILE)\b"
+    )
+    # Standard AWK markers (`BEGIN`, `END`, `NR`, `NF`, `FS`, `OFS`, etc.)
+    awk_marker_re = re.compile(
+        r"\b(?:BEGIN|END)\s*\{|\b(?:NR|FNR|NF|FS|OFS|RS|ORS|FILENAME|ENVIRON|ARGC|ARGV)\b|\b(?:gsub|sub|substr|split|tolower|toupper)\s*\(",
+    )
+    if not has_bash_syntax and "{" in body and "}" in body and (
+        awk_marker_re.search(body) or gawk_ext_re.search(body) or norm_default in ("awk", "gawk")
+    ):
+        if gawk_ext_re.search(body) or norm_default == "gawk":
+            return "gawk"
+        return "awk"
+
+    # Pure SED detection: every non-comment line is a sed command (`s/.../.../`, `/pat/d`, `y/.../.../`, etc.)
+    sed_line_re = re.compile(
+        r"^(?:[0-9]+|\$|/(?:\\.|[^/])+/|[0-9]+\s*,\s*(?:[0-9]+|\$|/(?:\\.|[^/])+/)?"
+        r"|/(?:\\.|[^/])*/\s*,\s*/(?:\\.|[^/])*/)?\s*!?\s*"
+        r"(?:[sy](.).*\1.*\1[gip0-9Ims]*|[daicpqn=btThHgGxNPl]|r\s+\S+|w\s+\S+|\{|\}|:.*)\s*;?\s*$"
+    )
+    if not has_bash_syntax and (
+        all(sed_line_re.match(ln) for ln in non_comment)
+        or (
+            norm_default == "sed"
+            and any(
+                ln.startswith(("s/", "s|", "s#", "y/")) or ln.endswith(("/d", "/p"))
+                for ln in non_comment
+            )
+        )
+    ):
+        return "sed"
+
+    if norm_default in ("sed", "awk", "gawk") and has_bash_syntax:
+        return "bash"
+
+    return norm_default
+
+
 def _resolve_runner_language(language: str, source_code: str) -> str:
-    """Auto-upgrade `python` to `python-db` when `psycopg2` is imported in `source_code`."""
-    key = (language or "").strip().lower()
+    """Normalize language aliases, auto-upgrade `python` to `python-db` when `psycopg2`
+    is imported, and auto-detect pure `sed` / `awk` / `gawk` scripts vs `bash`."""
+    raw = (language or "").strip().lower()
+    key = _LANGUAGE_ALIASES.get(raw, raw)
     if key == "python" and source_code and ("psycopg2" in source_code or "pg8000" in source_code):
         return "python-db"
+    if key in ("bash", "sed", "awk", "gawk") and source_code:
+        return detect_shell_script_dialect(source_code, default_lang=key)
     return key
 
 
@@ -198,7 +330,7 @@ def ensure_language_image(language: str) -> str | None:
     """
     language = language.strip().lower()
     
-    if language in ("bash", "sql"):
+    if language in ("bash", "sed", "awk", "gawk", "sql"):
         image_name = BASH_RUNNER_IMAGE
         dockerfile_func = _bash_runner_dockerfile
         dockerfile_name = "docker/bash-runner.Dockerfile"
@@ -345,6 +477,11 @@ def _clean_source_code(source_code: str, language: str) -> str:
     if heredoc_match:
         code = heredoc_match.group(2).strip()
 
+    # 3. For Java: Solution.java requires `public class Solution`. If the LLM named
+    # the sole public class `Main` or another identifier, rename it to `Solution`.
+    if language == "java" and not re.search(r"\bclass\s+Solution\b", code):
+        code = re.sub(r"\bpublic\s+class\s+[A-Za-z_][A-Za-z0-9_]*\b", "public class Solution", code, count=1)
+
     return code
 
 
@@ -478,6 +615,20 @@ def run_against_test_cases_batch(
             timeout_seconds=total_timeout,
         )
 
+        if batch_run.exit_code == 125 or (
+            batch_run.timed_out
+            and any(
+                marker in (batch_run.stderr or "")
+                for marker in ("Unable to find image", "Pulling from", "Downloading", "Extracting")
+            )
+        ):
+            err_msg = (
+                batch_run.stderr.strip()
+                or batch_run.stdout.strip()
+                or f"Docker failed to start container for image {runner.image!r} (exit 125)."
+            )
+            raise DockerNotAvailableError(err_msg)
+
         compile_err_path = batch_dir / "compile.err"
         if batch_run.exit_code == 100:
             err_text = (
@@ -601,6 +752,13 @@ def run_against_test_cases(
                 stdin_text=None,
                 timeout_seconds=COMPILE_TIMEOUT_SECONDS,
             )
+            if compile_result.exit_code == 125:
+                err_msg = (
+                    compile_result.stderr.strip()
+                    or compile_result.stdout.strip()
+                    or f"Docker failed to start container for image {runner.image!r} (exit 125)."
+                )
+                raise DockerNotAvailableError(err_msg)
             if compile_result.timed_out:
                 return ExecutionReport(compiled=False, compile_error="Compilation timed out.", results=[])
             if compile_result.exit_code != 0:
@@ -618,6 +776,13 @@ def run_against_test_cases(
                 stdin_text=stdin_text,
                 timeout_seconds=timeout_seconds,
             )
+            if run_result.exit_code == 125:
+                err_msg = (
+                    run_result.stderr.strip()
+                    or run_result.stdout.strip()
+                    or f"Docker failed to start container for image {runner.image!r} (exit 125)."
+                )
+                raise DockerNotAvailableError(err_msg)
             passed = (
                 not run_result.timed_out
                 and run_result.exit_code == 0

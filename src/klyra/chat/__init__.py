@@ -136,6 +136,8 @@ class ChatOrchestrator:
                     if self._on_tool_start:
                         await _maybe_await(self._on_tool_start(tool_name, tool_args))
 
+                    import time as _time
+                    tool_start_time = _time.time()
                     result = await self._executor.execute(tool_name, tool_args)
 
                     status = result.get("status", "error")
@@ -144,9 +146,9 @@ class ChatOrchestrator:
                     if self._on_tool_done:
                         await _maybe_await(self._on_tool_done(tool_name, status, message))
 
-                    # Detect generated files
+                    # Detect generated files and images
                     if status == "success" and self._on_file_link:
-                        await self._detect_files(tool_name, tool_args, message)
+                        await self._detect_files(tool_name, tool_args, message, since_time=tool_start_time)
 
                     func_response_parts.append(
                         types.Part(
@@ -178,25 +180,50 @@ class ChatOrchestrator:
 
         return full_response
 
-    async def _detect_files(self, tool_name, tool_args, message):
-        """Detect generated files from tool results and send file links."""
-        import re
+    async def _detect_files(self, tool_name, tool_args, message, since_time: float | None = None):
+        """Detect generated files and diagram images from tool results and send file links."""
+        import time
         from pathlib import Path
 
-        subject = tool_args.get("subject", "")
+        subject = str(tool_args.get("subject", "")).strip().lower()
         if not subject:
             return
 
-        # Look for common file patterns in the success message
+        now = time.time()
+        # Use tool start time (with a 2s buffer) so files created in early CrewAI tasks
+        # (like question_generator diagrams & -qp.md) are never missed when later tasks take >60s.
+        cutoff = (since_time - 2.0) if since_time is not None else (now - 180.0)
+
+        # Read-only tools shouldn't re-emit recently created files unless they are read_document on an image
+        readonly_tools = {"list_documents", "get_subject_skill", "verify_coding_package"}
+        if tool_name in readonly_tools:
+            return
+
+        if tool_name == "read_document":
+            # If the user asked to read/display a specific file or image, emit any referenced images
+            import re
+            for m in re.finditer(r"!\[([^\]]*)\]\((/files/[^)]+|\.\.?/\.assets/[^)]+)\)", message or ""):
+                img_url = m.group(2)
+                if not img_url.startswith("/files/"):
+                    clean_rel = img_url.lstrip("./")
+                    img_url = f"/files/{subject}/{clean_rel}"
+                img_name = Path(img_url).name
+                img_ext = Path(img_url).suffix.lower() or ".png"
+                if self._on_file_link:
+                    await _maybe_await(
+                        self._on_file_link(
+                            name=img_name,
+                            url=img_url,
+                            file_type=img_ext,
+                        )
+                    )
+            return
+
         docs_dir = Path("docs") / subject / "generated"
         if docs_dir.exists():
-            # Check for recently modified files and folders (within last 60 seconds)
-            import time
-            now = time.time()
-            
             # 1. Detect folders (for zip download)
-            for d in docs_dir.iterdir():
-                if d.is_dir() and (now - d.stat().st_mtime) < 60:
+            for d in sorted(docs_dir.iterdir()):
+                if d.is_dir() and d.stat().st_mtime >= cutoff:
                     if self._on_file_link:
                         await _maybe_await(
                             self._on_file_link(
@@ -207,8 +234,8 @@ class ChatOrchestrator:
                         )
 
             # 2. Detect individual files
-            for f in docs_dir.rglob("*"):
-                if f.is_file() and (now - f.stat().st_mtime) < 60:
+            for f in sorted(docs_dir.rglob("*")):
+                if f.is_file() and f.stat().st_mtime >= cutoff:
                     rel_path = f.relative_to(Path("docs"))
                     # Tag ownership so other users can't read this file (RBAC)
                     if self._user_id:
@@ -217,12 +244,35 @@ class ChatOrchestrator:
                             _repo.set_file_owner(rel_path.as_posix(), self._user_id, subject)
                         except Exception:
                             pass
+                    # Skip internal structured JSON sidecar files in UI file cards
+                    if f.suffix.lower() == ".json":
+                        continue
                     if self._on_file_link:
                         await _maybe_await(
                             self._on_file_link(
                                 name=f.name,
-                                url=f"/files/{rel_path}",
-                                file_type=f.suffix,
+                                url=f"/files/{rel_path.as_posix()}",
+                                file_type=f.suffix.lower(),
+                            )
+                        )
+
+        # 3. Detect newly generated diagram/graph images in docs/<subject>/.assets/generated/
+        assets_gen_dir = Path("docs") / subject / ".assets" / "generated"
+        if assets_gen_dir.exists():
+            image_exts = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"}
+            for img_file in sorted(assets_gen_dir.iterdir()):
+                if (
+                    img_file.is_file()
+                    and img_file.suffix.lower() in image_exts
+                    and img_file.stat().st_mtime >= cutoff
+                ):
+                    rel_path = img_file.relative_to(Path("docs"))
+                    if self._on_file_link:
+                        await _maybe_await(
+                            self._on_file_link(
+                                name=img_file.name,
+                                url=f"/files/{rel_path.as_posix()}",
+                                file_type=img_file.suffix.lower(),
                             )
                         )
 

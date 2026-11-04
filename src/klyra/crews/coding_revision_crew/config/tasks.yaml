@@ -13,9 +13,15 @@ revise_coding_problems_task:
     wrong (a bad test case, wrong expected output, a solution that didn't
     actually pass). Keep every problem not covered by either the manual
     instructions or the automated review exactly as-is.
-    Use search_coding_sources, search_pyq, and search_leetcode to ground any
+    use search_coding_sources, search_pyq, and search_leetcode to ground any
     new/replacement content when those sources exist - you do not need a
-    syllabus index. If you change a test case's expected output or a
+    syllabus index. Whenever a problem or {manual_instructions} requires a
+    graph, tree, or diagram (or if an existing diagram had invisible arrows,
+    short edges, or inaccuracies), automatically call `generate_diagram` or
+    `generate_graph` with spacious LaTeX/TikZ (`node distance=2.8cm`, explicit
+    `->, >={Stealth[length=3.5mm,width=2.4mm]}` arrows, and full `ground_truth`)
+    and embed the returned markdown image in the problem statement and `README.md`.
+    If you change a test case's expected output or a
     reference solution, use run_code to confirm the fix actually passes
     before finalizing - if Docker/run_code is unavailable, say so and note
     the fix is unverified.
@@ -64,8 +70,9 @@ revise_coding_problems_task:
 
 validate_revised_test_cases_task:
   description: >
-    Independently validate every test case for the revised coding problems above,
-    subject "{subject}", language {language}.
+    Independently validate every test case for ALL {num_questions} revised coding
+    problem(s) above, subject "{subject}", language {language}
+    (total number of problems = {num_questions}).
 
     1. Execute the revised reference solution against every public and private
        test case using `run_code` with `language="{language}"`. For `python-db`,

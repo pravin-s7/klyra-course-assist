@@ -312,41 +312,234 @@ def get_client() -> QdrantClient:
     else:
         qdrant_dir = os.environ.get("KLYRA_QDRANT_DIR", ".qdrant")
         os.makedirs(qdrant_dir, exist_ok=True)
-        client = QdrantClient(path=qdrant_dir)
-        
+        try:
+            client = QdrantClient(path=qdrant_dir)
+        except RuntimeError as exc:
+            if "already accessed by another instance" not in str(exc):
+                raise
+            # A stale or suspended process may be holding the old .lock inode.
+            # Unlink the stale .lock entry so a fresh lock inode can be acquired.
+            lock_path = os.path.join(qdrant_dir, ".lock")
+            try:
+                if os.path.exists(lock_path):
+                    os.unlink(lock_path)
+            except OSError:
+                pass
+            client = QdrantClient(path=qdrant_dir)
+
     def _close_client():
         try:
             client.close()
         except Exception:
             pass
-            
+
     atexit.register(_close_client)
     return client
 
 
 def close_client() -> None:
     try:
-        client = get_client()
-        client.close()
+        if get_client.cache_info().currsize > 0:
+            client = get_client()
+            client.close()
     except Exception:
         pass
     finally:
         get_client.cache_clear()
 
 
+def _patch_google_client_options() -> None:
+    """Ensure `google.api_core.client_options.ClientOptions` accepts `headers`
+    so legacy ChromaDB/CrewAI `GoogleGenerativeAiEmbeddingFunction` calls never
+    raise `ValueError: ClientOptions does not accept an option 'headers'`."""
+    try:
+        from google.api_core import client_options
+
+        if not hasattr(client_options.ClientOptions, "headers"):
+            setattr(client_options.ClientOptions, "headers", None)
+    except Exception:
+        pass
+
+
+_patch_google_client_options()
+
+
+try:
+    from chromadb.api.types import EmbeddingFunction as _ChromaEmbeddingFunction
+except Exception:
+    _ChromaEmbeddingFunction = object  # type: ignore[assignment,misc]
+
+DEFAULT_GOOGLE_EMBEDDING_MODEL = "gemini-embedding-2-preview"
+
+_MODEL_ALIASES: dict[str, str] = {
+    "gemini-embedding-2": "gemini-embedding-2-preview",
+    "models/gemini-embedding-2": "gemini-embedding-2-preview",
+    "gemini-embedding-002": "gemini-embedding-2-preview",
+    "models/gemini-embedding-002": "gemini-embedding-2-preview",
+}
+
+
+class _GoogleGenAIEmbeddingFunction(_ChromaEmbeddingFunction):  # type: ignore[misc]
+    """Multimodal & text embedding callable backed by the official `google-genai` SDK (`google.genai`).
+
+    Uses Gemini Embedding 2 (`gemini-embedding-2-preview` / `gemini-embedding-2`) by default,
+    supporting both text chunks and multimodal (text + image bytes) chunks.
+    Subclasses `chromadb.api.types.EmbeddingFunction` so CrewAI's `CustomProviderSpec`
+    Pydantic validation passes without errors.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        task_type: str | None = None,
+        api_key_env_var: str | None = None,
+        dimension: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        _ = (task_type, api_key_env_var, dimension, kwargs)
+        self.api_key = (
+            api_key
+            or os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("CHROMA_GOOGLE_GENAI_API_KEY")
+        )
+        if not self.api_key:
+            raise ValueError(
+                "Set GOOGLE_API_KEY or GEMINI_API_KEY when EMBEDDING_PROVIDER='google'."
+            )
+        raw_model = (
+            model_name
+            or os.environ.get("GOOGLE_EMBEDDING_MODEL")
+            or DEFAULT_GOOGLE_EMBEDDING_MODEL
+        )
+        self.model_name = _MODEL_ALIASES.get(raw_model, raw_model)
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            from google import genai
+            from klyra.core.retry import sdk_retry_options
+
+            self._client = genai.Client(
+                api_key=self.api_key,
+                http_options=sdk_retry_options(retry_attempts=2),
+            )
+        return self._client
+
+    def _candidate_models(self) -> list[str]:
+        models_to_try = [self.model_name]
+        for fallback in (
+            "gemini-embedding-2-preview",
+            "models/gemini-embedding-2-preview",
+            "gemini-embedding-2",
+            "models/gemini-embedding-2",
+        ):
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+        return models_to_try
+
+    def __call__(self, input: Any) -> list[list[float]]:
+        if not input:
+            return []
+        client = self._get_client()
+        results: list[list[float]] = []
+        batch_size = 100
+        models_to_try = self._candidate_models()
+
+        for i in range(0, len(input), batch_size):
+            batch = [
+                str(text) if str(text).strip() else " "
+                for text in input[i : i + batch_size]
+            ]
+            last_exc: Exception | None = None
+            for candidate_model in models_to_try:
+                try:
+                    resp = client.models.embed_content(
+                        model=candidate_model,
+                        contents=batch,
+                    )
+                    self.model_name = candidate_model
+                    for emb in resp.embeddings or []:
+                        results.append(list(emb.values or []))
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    if "not found" in msg or "404" in msg or "not supported" in msg:
+                        continue
+                    raise
+            if last_exc is not None:
+                raise last_exc
+        return results
+
+    def embed_multimodal(self, items: list[dict[str, Any]]) -> list[list[float]]:
+        """Embed items that may contain both `text` and `image_bytes` using
+        Gemini Embedding 2 (`gemini-embedding-2-preview`) multimodal capabilities."""
+        if not items:
+            return []
+        from google.genai import types
+
+        client = self._get_client()
+        models_to_try = self._candidate_models()
+        results: list[list[float]] = []
+
+        for item in items:
+            text_val = str(item.get("text") or "").strip()
+            img_bytes: bytes | None = item.get("image_bytes")
+            mime_type: str = str(item.get("image_mime_type") or "image/png")
+
+            if img_bytes:
+                parts: list[Any] = []
+                if text_val:
+                    parts.append(types.Part.from_text(text=text_val))
+                parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+                contents: Any = parts
+            else:
+                contents = [text_val if text_val else " "]
+
+            last_exc: Exception | None = None
+            for candidate_model in models_to_try:
+                try:
+                    resp = client.models.embed_content(
+                        model=candidate_model,
+                        contents=contents,
+                    )
+                    self.model_name = candidate_model
+                    if resp.embeddings:
+                        results.append(list(resp.embeddings[0].values or []))
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    if "not found" in msg or "404" in msg or "not supported" in msg:
+                        continue
+                    raise
+            if last_exc is not None:
+                raise last_exc
+        return results
+
+
 @lru_cache(maxsize=1)
 def get_embedding_function():
     from chromadb.utils import embedding_functions
 
-    provider = os.environ.get("EMBEDDING_PROVIDER", "default").lower()
+    default_provider = (
+        "google"
+        if (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"))
+        else "default"
+    )
+    provider = os.environ.get("EMBEDDING_PROVIDER", default_provider).lower()
     if provider == "openai":
         api_key = os.environ["OPENAI_API_KEY"]
         model_name = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
         return embedding_functions.OpenAIEmbeddingFunction(api_key=api_key, model_name=model_name)
     if provider == "google":
         api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        model_name = os.environ.get("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-2")
-        return embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=api_key, model_name=model_name)
+        model_name = os.environ.get("GOOGLE_EMBEDDING_MODEL", DEFAULT_GOOGLE_EMBEDDING_MODEL)
+        return _GoogleGenAIEmbeddingFunction(api_key=api_key, model_name=model_name)
     if provider == "default":
         return embedding_functions.DefaultEmbeddingFunction()
     raise ValueError(
@@ -355,38 +548,107 @@ def get_embedding_function():
     )
 
 
-def get_or_create_collection(name: str):
+def _collection_vector_size(client: QdrantClient, name: str) -> int | None:
+    try:
+        info = client.get_collection(name)
+        vectors_cfg = info.config.params.vectors
+        if hasattr(vectors_cfg, "size") and vectors_cfg.size:
+            return int(vectors_cfg.size)  # type: ignore[arg-type]
+    except Exception:
+        pass
+    return None
+
+
+def get_or_create_collection(name: str, vector_size: int | None = None):
     client = get_client()
     if not client.collection_exists(name):
-        emb_fn = get_embedding_function()
-        sample_emb = emb_fn(["test"])[0]
-        size = len(sample_emb)
+        if vector_size is None:
+            emb_fn = get_embedding_function()
+            sample_emb = emb_fn(["test"])[0]
+            size = len(sample_emb)
+        else:
+            size = vector_size
         client.create_collection(
             collection_name=name,
             vectors_config=VectorParams(size=size, distance=Distance.COSINE)
         )
+    elif vector_size is not None:
+        existing_size = _collection_vector_size(client, name)
+        if existing_size is not None and existing_size != vector_size:
+            # Collection was created under a different embedding model dimension;
+            # preserve existing documents and re-create with the new vector_size.
+            existing_records: list[ Any ] = []
+            try:
+                existing_records, _ = client.scroll(
+                    collection_name=name,
+                    limit=10000,
+                    with_payload=True,
+                )
+            except Exception:
+                existing_records = []
+            client.delete_collection(collection_name=name)
+            client.create_collection(
+                collection_name=name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+            if existing_records:
+                try:
+                    emb_fn = get_embedding_function()
+                    docs_to_reembed = [
+                        str((rec.payload or {}).get("_document") or " ")
+                        for rec in existing_records
+                    ]
+                    re_embeddings = call_with_retry(lambda: emb_fn(docs_to_reembed))
+                    migrated_points = [
+                        PointStruct(
+                            id=rec.id,
+                            vector=vec,
+                            payload=rec.payload or {},
+                        )
+                        for rec, vec in zip(existing_records, re_embeddings)
+                    ]
+                    client.upsert(collection_name=name, points=migrated_points)
+                except Exception:
+                    pass
     return name
 
 
 def add_chunks(collection_name: str, chunks: Iterable[dict[str, Any]]) -> int:
-    """chunks: iterable of {"text": str, "metadata": dict, "id"?: str}."""
+    """chunks: iterable of {"text": str, "metadata": dict, "id"?: str,
+    "image_bytes"?: bytes, "image_mime_type"?: str}."""
     client = get_client()
-    get_or_create_collection(collection_name)
     emb_fn = get_embedding_function()
     inferred_subject = extract_subject_from_collection(collection_name)
 
     ids = []
     documents = []
     metadatas = []
+    multimodal_items = []
+    has_multimodal = False
     for chunk in chunks:
         ids.append(chunk.get("id") or str(uuid.uuid4()))
         documents.append(chunk["text"])
         metadatas.append(chunk.get("metadata") or {})
+        img_bytes = chunk.get("image_bytes")
+        if img_bytes:
+            has_multimodal = True
+        multimodal_items.append(
+            {
+                "text": chunk["text"],
+                "image_bytes": img_bytes,
+                "image_mime_type": chunk.get("image_mime_type") or "image/png",
+            }
+        )
 
     if not documents:
+        get_or_create_collection(collection_name)
         return 0
 
-    embeddings = call_with_retry(lambda: emb_fn(documents))
+    if has_multimodal and hasattr(emb_fn, "embed_multimodal"):
+        embeddings = call_with_retry(lambda: emb_fn.embed_multimodal(multimodal_items))
+    else:
+        embeddings = call_with_retry(lambda: emb_fn(documents))
+    get_or_create_collection(collection_name, vector_size=len(embeddings[0]))
 
     points = []
     for id_, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
@@ -432,17 +694,21 @@ def query(
     inferred_subject = extract_subject_from_collection(collection_name)
     emb_fn = get_embedding_function()
     query_emb = call_with_retry(lambda: emb_fn([query_text]))[0]
+    get_or_create_collection(collection_name, vector_size=len(query_emb))
 
     query_filter = _build_filter(where)
     dense_limit = max(n_results * 4, 20) if hybrid else n_results
 
-    dense_hits = client.query_points(
-        collection_name=collection_name,
-        query=query_emb,
-        limit=dense_limit,
-        query_filter=query_filter,
-        with_payload=True,
-    ).points
+    try:
+        dense_hits = client.query_points(
+            collection_name=collection_name,
+            query=query_emb,
+            limit=dense_limit,
+            query_filter=query_filter,
+            with_payload=True,
+        ).points
+    except Exception:
+        dense_hits = []
 
     candidates: dict[str, dict[str, Any]] = {}
     dense_ranked_ids: list[str] = []

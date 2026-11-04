@@ -9,31 +9,27 @@ create_qp_task:
     requester: {notes}
 
     **STEP 1 — SCOPE & GROUNDING:**
-    Call list_source_files first. If syllabus/parsed files exist, use
-    search_syllabus to ground every question in real indexed concepts for
-    the requested subject/week/source scope only — never invent syllabus
-    content. If source_filter is not "any", call list_source_files first to
-    resolve it to an exact source_file, then pass source_file= to
-    search_syllabus / search_pyq / search_images — if nothing matches, say
-    so instead of ignoring the restriction.
+    Call list_source_files first. You can generate the question paper from ANY
+    available material for "{subject}" — whether from week resources
+    (week_1..week_12, additional, transcripts via search_syllabus) OR from the
+    PYQ bank (pyq/ via fetch_pyq_chunks and search_pyq), whether already
+    indexed in the vector store or available directly on disk (just like coding
+    problem generation).
+    - If syllabus/week files exist for the requested scope, use search_syllabus
+      to ground questions in those concepts.
+    - If the syllabus index or requested week folders are empty, DO NOT refuse
+      to generate the paper! Instead, seamlessly use fetch_pyq_chunks and
+      search_pyq (and/or any other available subject files, --concepts, --notes,
+      and the subject's skill.md domain rules) to generate all {num_questions}
+      requested questions.
+    - If source_filter is not "any", call list_source_files first to resolve it
+      to a matching source_file, then pass source_file= to search_syllabus /
+      search_pyq / fetch_pyq_chunks.
 
-    If the syllabus index is empty but PYQ files exist, you may use the
-    PYQ bank as a fallback ONLY IF the user requested 'all' weeks (e.g., 'all weeks (1-12)') 
-    or did not restrict the scope to specific weeks. If the user explicitly requested
-    specific restricted weeks (e.g. 'week 3' or 'weeks 1, 2') and the syllabus index is 
-    empty for those weeks, DO NOT fallback to random PYQs because PYQs are not
-    labeled by week and you will generate off-topic questions. Instead,
-    immediately state that the syllabus for the requested weeks has not been
-    ingested and refuse to generate the paper. Do not invent questions.
-    Do not guess the course from the subject slug (e.g. do not treat "ct"
-    as compiler theory). Tag week as "pyq" when a question is sourced only
-    from the PYQ bank. If both syllabus and PYQ are empty, then say ingest
-    is missing instead of guessing.
+    If concepts is "any": derive from syllabus/week files when available, else
+    from the PYQ bank and subject domain rules.
 
-    If concepts is "any": derive from syllabus when indexed, else from
-    the PYQ bank — never from the subject slug.
-
-    **STEP 2 — PYQ-SIMILAR QUESTIONS:**
+    **STEP 2 — PYQ-SIMILAR QUESTIONS & COURSE NOTATION FIDELITY:**
     If pyq_similar_count > 0, OR if you are generating from the PYQ bank
     because syllabus is empty, use fetch_pyq_chunks / search_pyq to find
     real PYQs and write NEW questions that test the same underlying concept
@@ -41,37 +37,52 @@ create_qp_task:
     verbatim and NEVER just change numbers, variable names, or make slight
     wording tweaks; tag which questions are PYQ-similar plus which PYQ they
     were inspired by. Do not pass week= to search_pyq.
+    CRITICAL NOTATION RULE: Different textbooks use different symbols for the
+    same meaning. You MUST strictly use the EXACT notation, symbols, vertex/node
+    labels, variable names, and operator syntax used in the course lectures and
+    PYQs (e.g. in CT: 0-indexed integer graph vertices 0, 1, 2, 3, 4, 5 with
+    vertex list ListV and adjacency matrix M[i][j], list helpers first(L),
+    last(L), rest(L), init(L), ++, and flowchart ovals/rounded-rectangles/diamonds;
+    in DBMS: Chen ER notation and T1, T2 schedule graphs).
 
-    **STEP 3 — DIAGRAMS:**
-    By default, you MUST proactively try to include questions that require
-    visual diagrams, tables, or graphs. For any question about a
-    diagram-based concept (block diagram, logic circuit, state machine,
-    architecture diagram, flow chart, etc.), call search_images first to
-    find reference material. NEVER embed raw images from search_images
-    directly, as they are often messy video screenshots (e.g., showing the
-    professor's face). Instead, if you find a relevant match, extract its
-    exact logical structure or data, and call generate_diagram with
-    LaTeX/TikZ to render a clean, synthetic version of it. If no match
-    exists but the question needs a diagram specific to this question's own
-    data (e.g. "the state machine after applying these exact inputs", "this
-    exact architecture layout"), work out the exact correct structure
-    yourself first, paying close attention to the domain semantics of the
-    subject (e.g. use DIRECTED graphs for data structures, precise logic
-    gates for circuits, proper ER symbols for DBMS, etc). Then call
-    generate_diagram with LaTeX/TikZ to render it precisely — only do this
-    once you already know the structure is correct, since it will faithfully
-    draw whatever you give it, and always pass a complete ground_truth
-    (every node/edge or cell) since the review/solve agents cannot see the
-    rendered image and rely entirely on that text to verify and solve the
-    question. If generate_diagram is unavailable or fails to compile, write
-    the question as text-only rather than fabricating a diagram reference.
+    **STEP 3 — AUTOMATIC DIAGRAMS & VISUAL VERIFICATION:**
+    Whenever any question involves or benefits from a visual structure (graph,
+    tree, B-tree, ER diagram, state machine, logic circuit, block diagram,
+    architecture diagram, flow chart, etc.), you MUST automatically generate
+    and embed a diagram during paper creation — never wait for a separate prompt.
+    Call search_images first to find reference material and verify the course's
+    and PYQs' visual notation and symbol conventions. NEVER embed raw images
+    from search_images directly, as they are often messy video screenshots.
+    Instead, work out the exact logical structure yourself, using the EXACT
+    course and PYQ notation and symbols (never substitute alternative symbols
+    that have the same meaning — e.g. in CT graphs use 0-indexed integer vertex
+    labels 0, 1, 2, 3, 4, 5 matching ListV and M[i][j] rather than S1, S2 or
+    v1, v2; use DIRECTED graphs with Stealth arrowheads and generous node
+    spacing >= 2.8cm; use proper Chen ER symbols for DBMS). Then call
+    `generate_diagram` (or `generate_graph`) with LaTeX/TikZ to render it. The
+    tool automatically inspects the rendered PNG for invisible arrowheads, short
+    edges, overlapping labels, and course/PYQ notation consistency, and
+    regenerates the diagram if any issue is found. Always pass a complete
+    `ground_truth` (every node/edge or cell using the exact same symbols as the
+    question text) so the review/solve agents can verify the question, and place
+    the returned `![caption](...)` markdown link in the question's
+    `diagram_markdown` field. If generate_diagram is unavailable or fails to
+    compile, write the question as text-only rather than fabricating a diagram
+    reference.
 
-    **STEP 4 — APPLIED/COMPUTATIONAL QUESTIONS:**
+    **STEP 4 — APPLIED/COMPUTATIONAL QUESTIONS & REALISTIC DATA:**
     For applied/computational concepts (e.g. algorithm tracing,
     mathematical derivations, logic/state manipulations) — write an actual
     problem with concrete data (a specific state, specific numbers/values,
     specific code logic), asking the student to derive/compute a specific
     result.
+    CRITICAL REALISM RULE: Always use realistic, real-time scenarios and
+    authentic data (e.g., realistic Indian/global names like Aarav, Diya,
+    Karthik, Meera, Rohan, Priya, Vikram; real cities/stations like Chennai,
+    Bengaluru, Mumbai, Delhi, Hyderabad; realistic university courses, hospital
+    records, e-commerce transactions, sensor readings, or server logs). NEVER
+    use cliché AI/textbook placeholder tokens like `Alice`, `Bob`, `Charlie`,
+    `Dave`, `Eve`, `John Doe`, `foo`, `bar`, `baz`, `Widget A`, or `Company X`.
 
     **STEP 5 — TONE & LANGUAGE:**
     Write questions using clear, simple, and minimal text. The output must

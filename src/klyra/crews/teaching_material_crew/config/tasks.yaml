@@ -15,8 +15,11 @@ prepare_teaching_material_task:
     major concept; (4) a real diagram where one genuinely helps
     (search_images first; only call generate_diagram for a diagram specific
     to an example you're constructing and whose exact structure you already
-    know, applying proper domain semantics like DIRECTED graphs, 
-    logic gates for circuits, ER symbols for DBMS, etc - never fabricate one); (5) a short set of discussion/check-in
+    know, strictly using the EXACT notation, symbols, and vertex/node labels
+    used in the course and PYQs — e.g. 0-indexed integer vertices 0, 1, 2, ...
+    with ListV and M[i][j] for CT directed graphs, logic gates for circuits,
+    Chen ER symbols for DBMS — never substitute different symbols that have the
+    same meaning, and never fabricate one); (5) a short set of discussion/check-in
     questions for the end of the session. Follow the instructor's notes on
     emphasis, depth, and format even where they add to or reshape this
     default structure - the notes take priority over the default structure.
@@ -25,7 +28,9 @@ prepare_teaching_material_task:
     engaging, and human tone. Do not use dry, encyclopedic phrasing. Present 
     the concepts as if you are passionately explaining them to a student in 
     real-time, using analogies and thought-provoking questions to spark their 
-    curiosity.
+    curiosity. Always use realistic, real-time scenarios and authentic datasets
+    in worked examples and practice questions — NEVER use cliché AI placeholder
+    names like `Alice`, `Bob`, `Charlie`, `foo`, `bar`, or `baz`.
 
     **SUBJECT SKILL & TEACHING FORMAT RULES (`docs/{subject}/skill.md`):**
     {subject_skill_rules}

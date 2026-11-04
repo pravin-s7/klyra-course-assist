@@ -51,10 +51,11 @@ from dotenv import load_dotenv
 warnings.filterwarnings("ignore", category=FutureWarning)
 logging.getLogger("google_genai._api_client").setLevel(logging.ERROR)
 logging.getLogger("google_genai.models").setLevel(logging.ERROR)
+logging.getLogger("crewai.llms.base_llm").setLevel(logging.ERROR)
 
 # Kept as a plain string (not imported from code_execution_tool.LANGUAGE_RUNNERS) so
 # building --help doesn't pull in crewai/pydantic just to print this list.
-_SUPPORTED_LANGUAGES_HELP = "python, java, c, cpp, bash, sql, postgresql, python-db"
+_SUPPORTED_LANGUAGES_HELP = "python, java, c, cpp, bash, sed, awk, gawk, sql, postgresql, python-db"
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -559,7 +560,15 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(Path.cwd() / ".env", override=True)
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    finally:
+        try:
+            from klyra.tools import vector_store
+
+            vector_store.close_client()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

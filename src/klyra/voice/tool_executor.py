@@ -153,6 +153,11 @@ class ToolExecutor:
         try:
             result = await asyncio.to_thread(_run_with_redirect, handler, args, loop)
             logger.info("Tool %s completed successfully", name)
+            subj = str(args.get("subject", "")).strip().lower()
+            if subj and isinstance(result, dict):
+                for k in ("message", "markdown"):
+                    if isinstance(result.get(k), str):
+                        result[k] = self._rewrite_markdown_asset_urls(result[k], subj)
             return {"status": "success", **result}
         except Exception as exc:
             logger.error("Tool %s failed: %s", name, exc, exc_info=True)
@@ -163,6 +168,33 @@ class ToolExecutor:
             }
 
     # ── Individual handlers (all run in a worker thread) ─────────────
+
+    @staticmethod
+    def _rewrite_markdown_asset_urls(text: str, subject: str) -> str:
+        """Rewrite relative markdown image paths (e.g. '../.assets/...') to web '/files/<subject>/.assets/...' URLs."""
+        import re
+
+        if not text or not subject:
+            return text
+        # 1. ![alt](../.assets/...) or ![alt](./.assets/...) or ![alt](.assets/...)
+        text = re.sub(
+            r"(!\[[^\]]*\]\()(?:\.\./|\./)?\.assets/",
+            rf"\1/files/{subject}/.assets/",
+            text,
+        )
+        # 2. ![alt](docs/<subject>/.assets/...)
+        text = re.sub(
+            rf"(!\[[^\]]*\]\()docs/{re.escape(subject)}/\.assets/",
+            rf"\1/files/{subject}/.assets/",
+            text,
+        )
+        # 3. ![alt](/files/<subject>/assets/...) -> ensure dot in .assets
+        text = re.sub(
+            rf"(!\[[^\]]*\]\()/files/{re.escape(subject)}/assets/",
+            rf"\1/files/{subject}/.assets/",
+            text,
+        )
+        return text
 
     @staticmethod
     def _run_ingest(args: dict) -> dict:
@@ -468,12 +500,24 @@ class ToolExecutor:
             
         logger.info("Reading document content...")
         try:
-            if target_path.suffix.lower() == ".pdf":
+            suffix = target_path.suffix.lower()
+            if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}:
+                rel_to_docs = target_path.relative_to(subject_dir.parent).as_posix()
+                web_url = f"/files/{rel_to_docs}"
+                return {
+                    "message": (
+                        f"Image file '{target_path.name}' found at {web_url}.\n\n"
+                        f"Include this exact Markdown image syntax in your reply to display it in the chat UI:\n"
+                        f"![{target_path.stem}]({web_url})"
+                    )
+                }
+            if suffix == ".pdf":
                 from pypdf import PdfReader
                 reader = PdfReader(str(target_path))
                 content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
             else:
                 content = target_path.read_text(encoding="utf-8")
+                content = ToolExecutor._rewrite_markdown_asset_urls(content, subject)
                 
             # If it's too long, truncate it so Gemini voice doesn't choke on a 50k token context blast
             # But normally we want the whole document. Let's just return it.
@@ -500,10 +544,10 @@ class ToolExecutor:
             if match:
                 rel_path = match.group(1)
                 file_name = rel_path.split("/")[-1]
-                web_path = f"/files/{args['subject']}/assets/generated/{file_name}"
+                web_path = f"/files/{args['subject']}/.assets/generated/{file_name}"
                 result = result.replace(rel_path, web_path)
                 
-            return {"status": "success", "markdown": result}
+            return {"status": "success", "markdown": result, "message": result}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 

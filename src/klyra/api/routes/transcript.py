@@ -4,10 +4,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from klyra.api.dependencies import DEFAULT_RATE_LIMIT, limiter, require_api_key
-from klyra.celery_app import celery_app
+from klyra.celery_app import dispatch_job
 from klyra.models.requests import TranscriptRequest
 from klyra.models.responses import JobAccepted
 from klyra.services import job_store
+from klyra.services.transcript_service import run_transcript, run_transcript as _orig_run_transcript
 from klyra.utils import fs
 
 router = APIRouter(tags=["transcript"])
@@ -29,8 +30,14 @@ def transcript(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     job_id = job_store.create_job("transcript", subject=subject, url=req.url)
-    celery_app.send_task(
+    dispatch_job(
         "klyra.worker.run_transcript_fetch_task",
-        kwargs=dict(job_id=job_id, url=req.url, subject=subject, week=req.week, title=req.title)
+        job_id,
+        run_transcript,
+        _orig_run_transcript,
+        url=req.url,
+        subject=subject,
+        week=req.week,
+        title=req.title,
     )
     return JobAccepted(job_id=job_id)

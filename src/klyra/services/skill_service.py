@@ -45,10 +45,12 @@ def _generic_subject_skill(subject: str) -> SubjectSkillConfig:
         domain_pedagogical_rules=(
             f"- Ground all content strictly in the indexed syllabus for **{display_name}**.\n"
             "- Ensure questions test conceptual understanding and analytical application rather than rote recall.\n"
-            "- Distractors in MCQ/MSQ items must correspond to plausible student misconceptions."
+            "- Distractors in MCQ/MSQ items must correspond to plausible student misconceptions.\n"
+            "- **REALISTIC DATA & REAL-TIME SCENARIOS (MANDATORY):** Always use authentic, real-world scenarios and realistic data (e.g., realistic names like Aarav, Diya, Karthik, Meera, Rohan, Priya, Vikram; real Indian/global cities, institutions, courses, products, timestamps, and non-trivial numeric values). NEVER use cliché AI/textbook placeholder tokens like `Alice`, `Bob`, `Charlie`, `Dave`, `Eve`, `John Doe`, `foo`, `bar`, `baz`, `Widget A`, or `Company X`."
         ),
         diagram_visual_conventions=(
-            "- Use clean, high-contrast diagrams with explicit node labels and legends where helpful."
+            "- Use clean, high-contrast diagrams with explicit node labels and legends where helpful.\n"
+            "- **COURSE & PYQ NOTATION FIDELITY (MANDATORY):** Always use the exact same notation, symbols, vertex/node labels, operator symbols, and diagram shapes as used in the course lectures and Previous Year Questions (PYQs). Never substitute different textbook symbols that have the same meaning."
         ),
         qp_output_format_rules=(
             "- Format every question with `### Question N (WNN-QNN) [TYPE] [Marks: M]`.\n"
@@ -247,16 +249,39 @@ def build_skill_prompt_inputs(subject: str, root: Path = DOCS_ROOT) -> dict[str,
         else "None mandatory"
     )
 
+    realistic_data_mandate = (
+        "REALISTIC DATA & REAL-TIME SCENARIO MANDATE (ALL SUBJECTS):\n"
+        "- Every question, table, dataset, code snippet, and test case MUST use realistic, real-time domain scenarios and authentic data (e.g., realistic names such as Aarav, Diya, Karthik, Meera, Rohan, Ananya, Vikram, Priya; real cities/stations such as Chennai, Bengaluru, Mumbai, Delhi, Hyderabad; realistic product/course/sensor/log/financial records and non-trivial values).\n"
+        "- STRICTLY FORBIDDEN PLACEHOLDERS: NEVER use AI-cliché or textbook dummy names/tokens such as `Alice`, `Bob`, `Charlie`, `Dave`, `Eve`, `John Doe`, `Jane Doe`, `foo`, `bar`, `baz`, `qux`, `Widget A`, `Item 1`, or `Company X`."
+    )
+
+    course_notation_mandate = (
+        "COURSE & PYQ NOTATION & SYMBOL FIDELITY MANDATE (ALL SUBJECTS):\n"
+        "- Different textbooks and AI models often use different symbols or visual conventions to represent the same concept. You MUST strictly use the EXACT notation, symbols, vertex/node labels, variable names, operator syntax, and diagram conventions used in THIS course's lectures and PYQs (retrieved via `search_syllabus`, `search_pyq`, `fetch_pyq_chunks`, `search_images`, and `skill.md`).\n"
+        "- Whenever a question or diagram is inspired by or references a PYQ, inspect the PYQ text and figures first and preserve the exact same symbol system (for example, in Computational Thinking (`ct`): 0-indexed integer graph vertices `0, 1, 2, 3, 4, 5` with adjacency matrix `M` / `H` / `A` (`M[i][j] == 1`) and vertex list `ListV`, list helpers `first(L)`, `last(L)`, `rest(L)`, `init(L)`, `++`, and flowchart blocks `Start`/`End` ovals + `Read Card X from Pile 1` / `Table 1` rectangles + `Yes`/`No` condition diamonds; in `dbms`: Chen ER rectangles/diamonds/ovals with underlined primary keys and transaction schedule graphs with `T_1, T_2, ...`).\n"
+        "- Maintain 100% symbol and notation consistency between the question text, code/pseudocode, options, answer key, and generated diagram (`latex_body` and `ground_truth`)."
+    )
+
     subject_skill_rules = (
         f"Subject: {skill.display_name} ({skill.subject_id}) | Domain: {skill.domain}\n"
         f"Allowed Question Types: {', '.join(skill.allowed_question_types)}\n"
         f"Strict Syllabus Grounding: {skill.strict_syllabus_grounding}\n"
-        f"Domain & Pedagogical Rules:\n{skill.domain_pedagogical_rules}"
+        f"Domain & Pedagogical Rules:\n{skill.domain_pedagogical_rules}\n"
+        f"{realistic_data_mandate}\n"
+        f"{course_notation_mandate}"
+    )
+
+    universal_diagram_quality_mandate = (
+        "UNIVERSAL DIAGRAM VISUAL QUALITY & COURSE NOTATION RULES (GRAPHS, FLOWCHARTS, CIRCUITS, ER DIAGRAMS, TREES):\n"
+        "- **EXACT COURSE & PYQ NOTATION:** Every generated diagram MUST use the exact symbols, node labels, edge representations, gate/ER shapes, and variable names used in the course syllabus and PYQs. Never invent alternative symbols that have the same meaning (e.g., do NOT use `S_1, S_2` or `v_1, v_2` when the course and PYQs use `0, 1, 2, 3, 4, 5` with `ListV` and `M[i][j]`; do NOT use Crow's Foot when the course uses Chen ER rectangles/diamonds/ovals).\n"
+        "- For GRAPHS: Use clean black-and-white textbook circular vertices (`circle, draw=black, fill=white, thick, minimum size=8.5mm`) — NEVER use blue/colored circles. Arrange vertices in a non-collinear convex polygon (e.g. pentagon/hexagon layout such as `(0,1.8)`, `(2.0,3.6)`, `(4.8,3.6)`, `(4.8,0.0)`, `(2.0,0.0)`) so NO straight or curved edge ever cuts through or touches another node's circle. Place edge weights with `fill=white, inner sep=1.5pt` or `pos=0.35` so crossing edges never collide with weights.\n"
+        "- For FLOWCHARTS / PROCEDURE FLOWS / ER DIAGRAMS / CIRCUITS: ALWAYS use border-to-border relative positioning (`below=1.5cm of prev`, `right=2.4cm of prev` from `\\usetikzlibrary{positioning}`) instead of cramped `(x,y)` coordinates, and use `diamond, aspect=2.0, draw=black, thick, align=center, inner sep=2pt` for decision diamonds so shapes NEVER overlap and every connecting arrow has a long (>= 1.5cm), clearly visible shaft. Place branch labels ('Yes', 'No') with `fill=white, inner sep=2pt` or clear `above`/`left`/`right` offsets so lines NEVER strike through text."
     )
 
     subject_diagram_rules = (
         f"Preferred Diagram Style: {skill.diagram_style}\n"
-        f"{skill.diagram_visual_conventions}"
+        f"{skill.diagram_visual_conventions}\n"
+        f"{universal_diagram_quality_mandate}"
     )
 
     subject_qp_format = (

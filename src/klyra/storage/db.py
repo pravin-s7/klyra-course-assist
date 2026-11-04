@@ -14,18 +14,37 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import time
+
 _engine = None
 _SessionLocal = None
+_engine_key: str | None = None
+
+
+def _current_db_key() -> str:
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+        return f"url:{db_url}"
+    db_path = Path(os.environ.get("KLYRA_DB", ".db/klyra.db")).resolve()
+    return f"sqlite:{db_path}"
 
 
 def _get_engine():
-    global _engine, _SessionLocal
-    if _engine is None:
+    global _engine, _SessionLocal, _engine_key
+    key = _current_db_key()
+    if _engine is None or _engine_key != key:
+        if _engine is not None:
+            try:
+                _engine.dispose()
+            except Exception:
+                pass
         db_url = os.environ.get("DATABASE_URL")
         if db_url:
             if db_url.startswith("postgres://"):
                 db_url = db_url.replace("postgres://", "postgresql://", 1)
-            _engine = create_engine(db_url, pool_size=10, max_overflow=20)
+            _engine = create_engine(db_url, pool_size=10, max_overflow=20, pool_pre_ping=True)
         else:
             db_path = Path(os.environ.get("KLYRA_DB", ".db/klyra.db"))
             db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +54,7 @@ def _get_engine():
         # expire_on_commit=False so repo helpers can return ORM objects
         # (e.g. UserRecord.id) after the session context closes.
         _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
+        _engine_key = key
     return _SessionLocal
 
 
@@ -43,11 +63,22 @@ def init_db() -> None:
     from klyra.storage.models import Base  # local import avoids cycles
 
     Session = _get_engine()
-    
-    # Run migrations first to prevent column missing errors when querying
+    bind = Session.kw["bind"]
+
+    # Wait briefly if PostgreSQL container is still starting up
+    for attempt in range(15):
+        try:
+            Base.metadata.create_all(bind=bind)
+            break
+        except Exception:
+            if attempt == 14:
+                raise
+            time.sleep(1.0)
+
+    # Run idempotent schema migrations for pre-existing tables
     db_url = os.environ.get("DATABASE_URL", "")
     is_postgres = db_url.startswith("postgres")
-    
+
     from sqlalchemy import text
 
     with Session() as session:
@@ -84,8 +115,6 @@ def init_db() -> None:
                 session.commit()
             except Exception:
                 session.rollback()
-
-    Base.metadata.create_all(bind=Session.kw["bind"])
 
 
 @contextmanager

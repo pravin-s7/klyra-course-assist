@@ -15,3 +15,5 @@ tests/
 docker/
 CLIENT_APP_README.md
 docs/
+.crewai/
+uv.lock

@@ -6,10 +6,16 @@ validation), revise on demand, and fetch finished artifacts.
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from klyra.api.dependencies import DEFAULT_RATE_LIMIT, limiter, require_api_key
-from klyra.celery_app import celery_app
+from klyra.celery_app import dispatch_job
 from klyra.models.requests import CodeRequest, ReviseCodeRequest
 from klyra.models.responses import CodingProblemFilesResponse, JobAccepted
 from klyra.services import job_store, results_service
+from klyra.services.coding_problem_service import (
+    run_coding_generation,
+    run_coding_generation as _orig_run_coding_generation,
+    run_coding_revision,
+    run_coding_revision as _orig_run_coding_revision,
+)
 from klyra.utils import fs
 
 router = APIRouter(tags=["coding-problems"])
@@ -35,25 +41,25 @@ def generate_code(subject: str, req: CodeRequest, request: Request) -> JobAccept
         )
 
     job_id = job_store.create_job("code", subject=subject, name=req.name, language=req.language)
-    celery_app.send_task(
+    dispatch_job(
         "klyra.worker.run_coding_generation_task",
-        kwargs=dict(
-            job_id=job_id,
-            subject=subject,
-            name=req.name,
-            language=req.language,
-            scope=req.scope,
-            difficulty=req.difficulty,
-            num_questions=req.num_questions,
-            public_tests=req.public_tests,
-            private_tests=req.private_tests,
-            source=req.source,
-            pyq_similar=req.pyq_similar,
-            leetcode_similar=req.leetcode_similar,
-            include_reference=req.include_reference,
-            concepts=req.concepts,
-            notes=req.notes,
-        )
+        job_id,
+        run_coding_generation,
+        _orig_run_coding_generation,
+        subject=subject,
+        name=req.name,
+        language=req.language,
+        scope=req.scope,
+        difficulty=req.difficulty,
+        num_questions=req.num_questions,
+        public_tests=req.public_tests,
+        private_tests=req.private_tests,
+        source=req.source,
+        pyq_similar=req.pyq_similar,
+        leetcode_similar=req.leetcode_similar,
+        include_reference=req.include_reference,
+        concepts=req.concepts,
+        notes=req.notes,
     )
     return JobAccepted(job_id=job_id)
 
@@ -74,9 +80,15 @@ def revise_code(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     job_id = job_store.create_job("revise-code", subject=subject, name=name, language=req.language)
-    celery_app.send_task(
+    dispatch_job(
         "klyra.worker.run_coding_revision_task",
-        kwargs=dict(job_id=job_id, subject=subject, name=name, language=req.language, notes=req.notes)
+        job_id,
+        run_coding_revision,
+        _orig_run_coding_revision,
+        subject=subject,
+        name=name,
+        language=req.language,
+        notes=req.notes,
     )
     return JobAccepted(job_id=job_id)
 

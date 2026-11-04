@@ -23,18 +23,26 @@ revise_qp_task:
     ensure it uses clear, simple, and minimal text. The output must feel 
     entirely human-generated. Strictly avoid lengthy AI-like conversational 
     filler, overly dramatic scenarios, or robotic phrasing. Get straight to the point.
+    Always use realistic, real-time domain scenarios and authentic data (e.g.,
+    realistic names like Aarav, Diya, Karthik, Meera, Rohan, Priya; real cities,
+    courses, products, or logs) — NEVER use cliché AI placeholder names like
+    `Alice`, `Bob`, `Charlie`, `Dave`, `John Doe`, `foo`, `bar`, or `baz`.
 
-    If a replacement question concerns a diagram-based concept (block diagram,
-    logic circuit, state machine, architecture diagram, flow chart, etc.), call search_images
-    first and embed a genuinely relevant result; if none exists and the
-    diagram is specific to this question's own data, work out the correct
-    structure yourself, paying close attention to the domain semantics of the subject 
-    (e.g. use DIRECTED graphs for CT, precise logic gates for circuits, proper ER 
-    symbols for DBMS, etc). Then call generate_diagram (LaTeX/TikZ) to render it,
-    always passing a complete ground_truth (every node/edge/cell) since
-    review/solve agents cannot see the rendered image - never fabricate a
-    diagram reference, and never guess the structure before calling
-    generate_diagram. If a question is flagged as a too-close PYQ copy,
+    Whenever any revised, replaced, or existing question requires a graph or
+    diagram (or if an existing diagram was flagged for invisible arrows, short
+    edge lengths, overlapping labels, missing directed edges, or non-course
+    notation/symbols), automatically call `generate_diagram` or `generate_graph`
+    (LaTeX/TikZ) using the EXACT notation and symbols used in the course and
+    PYQs (never substitute different symbols that have the same meaning — e.g.
+    in CT graphs use 0-indexed integer vertex labels 0, 1, 2, 3, 4, 5 matching
+    ListV and M[i][j]; in DBMS use Chen ER symbols), with generous node spacing
+    (`node distance=2.8cm`, coordinates at least 2.8cm apart) and explicit
+    directed Stealth arrows, always passing a complete `ground_truth` (every
+    node/edge/cell using the exact same symbols as the question text). The tool
+    automatically verifies visual quality and course/PYQ symbol consistency and
+    regenerates the diagram if any defect is detected. Embed the returned
+    `![caption](...)` markdown image in `diagram_markdown` — never fabricate a
+    diagram reference. If a question is flagged as a too-close PYQ copy,
     rewrite it to be similar in concept/difficulty but never verbatim.
 
     --- ORIGINAL QUESTION PAPER ---

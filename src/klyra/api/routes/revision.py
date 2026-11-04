@@ -4,10 +4,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from klyra.api.dependencies import DEFAULT_RATE_LIMIT, limiter, require_api_key
-from klyra.celery_app import celery_app
+from klyra.celery_app import dispatch_job
 from klyra.models.requests import ReviseRequest
 from klyra.models.responses import JobAccepted
 from klyra.services import job_store
+from klyra.services.revision_service import run_revision, run_revision as _orig_run_revision
 from klyra.utils import fs
 
 router = APIRouter(tags=["revision"])
@@ -27,8 +28,13 @@ def revise(subject: str, req: ReviseRequest, request: Request) -> JobAccepted:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     job_id = job_store.create_job("revise", subject=subject, qp_name=req.qp_name)
-    celery_app.send_task(
+    dispatch_job(
         "klyra.worker.run_revision_task",
-        kwargs=dict(job_id=job_id, subject=subject, qp_name=req.qp_name, notes=req.notes)
+        job_id,
+        run_revision,
+        _orig_run_revision,
+        subject=subject,
+        qp_name=req.qp_name,
+        notes=req.notes,
     )
     return JobAccepted(job_id=job_id)

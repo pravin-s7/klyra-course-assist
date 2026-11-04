@@ -57,6 +57,27 @@ create_coding_problems_task:
     first items in the draft public test set section. This ensures the
     validator will actually test and correct the examples if your
     hand-calculated expected outputs are wrong.
+    CRITICAL REALISM RULE: Both the problem scenario and every public/private
+    test case input MUST use realistic, real-time domain data (e.g., realistic
+    names like Aarav, Diya, Karthik, Meera, Rohan, Priya, Vikram; real cities,
+    department names, product SKUs, server logs, or transaction records). NEVER
+    use cliché AI/textbook placeholder names like `Alice`, `Bob`, `Charlie`,
+    `Dave`, `John Doe`, `foo`, `bar`, `baz`, or single-letter dummy names
+    (`A`, `B`, `C`, `D`) for people/employees/students.
+
+    **STEP 4B — AUTOMATIC DIAGRAMS & COURSE/PYQ NOTATION FIDELITY:**
+    Whenever a coding problem involves a graph, tree, linked list, state machine,
+    grid/matrix path, class hierarchy, or database ER schema (or when {notes}
+    requests a diagram/graph), you MUST automatically call `generate_diagram`
+    (or `generate_graph`) with clean LaTeX/TikZ code (`node distance=2.8cm`,
+    explicit directed Stealth arrows for directed graphs, and complete
+    `ground_truth`) using the EXACT notation, symbols, and vertex/node labels
+    used in the course lectures and PYQs (never substitute different symbols that
+    have the same meaning), and embed the returned Markdown image link directly
+    inside the problem statement / Example 1 explanation so it appears in
+    `README.md`. The tool automatically verifies arrow visibility, edge length,
+    layout, and course notation consistency and self-regenerates if any visual
+    defect is detected.
 
     **STEP 5 — REFERENCE SOLUTION:**
     A reference solution is NOT required in the student-facing file.
@@ -143,10 +164,11 @@ coding_discrepancy_review_task:
 
 validate_test_cases_task:
   description: >
-    Independently validate the test cases for the coding problems above,
-    subject "{subject}", language {language}.
+    Independently validate the test cases for ALL {num_questions} coding
+    problem(s) above, subject "{subject}", language {language}
+    (total number of problems = {num_questions}).
 
-    **FOR EVERY PROBLEM:**
+    **FOR EVERY PROBLEM (1 through {num_questions}):**
     1. Read the problem statement fresh and write your OWN reference
        solution in {language} (the creator may not have included one —
        that is intentional when include_reference is "no"; do not treat a
@@ -172,10 +194,13 @@ validate_test_cases_task:
       data, etc) as the `stdin` input for each test case when calling
       run_code, so the sandbox can populate the database before running
       your solution.
-    - Bash: Pass ONLY the raw bash script in `source_code` (e.g. `#!/bin/bash`
-      followed by commands reading from stdin and writing to stdout). Do NOT
-      wrap in `cat << 'EOF' > solution.sh`, do NOT invoke `./solution.sh`, and
-      do NOT use `python3` (the sandbox only has bash, sed, gawk, grep, coreutils,
+    - Bash / sed / awk / gawk: Pass ONLY the raw script in `source_code`:
+      * For Bash (`language="bash"`): `#!/bin/bash` followed by commands reading from stdin and writing to stdout.
+      * For pure GNU `sed` scripts (`language="sed"`): raw `sed -Ef` script rules (e.g. `s/.../.../g`, `/pattern/d`). Executed via `sed -Ef solution.sed < input.txt`.
+      * For standard `awk` scripts (`language="awk"`): raw `awk -f` script rules. Executed via `awk -f solution.awk < input.txt`.
+      * For GNU `gawk` scripts (`language="gawk"`): raw `gawk -f` script rules (supports `gensub`, `asort`, `PROCINFO`, `FPAT`, etc.). Executed via `gawk -f solution.awk < input.txt`.
+      Do NOT wrap in `cat << 'EOF' > solution.sh`, do NOT invoke `./solution.sh`, and
+      do NOT use `python3` (the sandbox only has bash, sed, awk, gawk, grep, coreutils,
       sqlite3). Stdin is fed automatically by the runner.
     - Diagnosing empty stdout: If a test case fails with `actual stdout: ''`
       (empty string) while exit code is 0, do NOT assume the runner failed to

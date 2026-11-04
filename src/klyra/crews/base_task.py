@@ -14,16 +14,23 @@ from klyra.utils.format_renderer import render_task_output_markdown
 _ACTIVE_CREW_INPUTS: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "_ACTIVE_CREW_INPUTS", default={}
 )
+_LAST_CREW_INPUTS: dict[str, Any] = {}
 
 
 def get_active_crew_inputs() -> dict[str, Any]:
     """Return the active crew inputs dictionary for the current task execution."""
-    return dict(_ACTIVE_CREW_INPUTS.get() or {})
+    ctx = _ACTIVE_CREW_INPUTS.get()
+    if ctx:
+        return dict(ctx)
+    return dict(_LAST_CREW_INPUTS)
 
 
 def set_active_crew_inputs(inputs: dict[str, Any]) -> None:
     """Set the active crew inputs dictionary for the current execution context."""
-    _ACTIVE_CREW_INPUTS.set(dict(inputs or {}))
+    global _LAST_CREW_INPUTS
+    copied = dict(inputs or {})
+    _ACTIVE_CREW_INPUTS.set(copied)
+    _LAST_CREW_INPUTS = copied
 
 
 def _infer_subject_from_path(output_file: str | None) -> str:
@@ -48,6 +55,8 @@ class KlyraTask(Task):
     def interpolate_inputs_and_add_conversation_history(
         self, inputs: dict[str, Any]
     ) -> None:
+        import re
+
         merged = dict(inputs or {})
         subj = str(merged.get("subject") or _infer_subject_from_path(self.output_file) or "general")
         try:
@@ -64,6 +73,27 @@ class KlyraTask(Task):
                 "subject_teaching_format",
             ):
                 merged.setdefault(k, "")
+
+        # Guard against literal `{identifier}` tokens (e.g. LaTeX `\begin{checkboxes}`
+        # or C/pseudocode blocks) in task descriptions/expected_output/agent fields
+        # crashing CrewAI's `interpolate_only` when they aren't input variables.
+        texts_to_scan = [self.description or "", self.expected_output or ""]
+        if self.agent is not None:
+            texts_to_scan.extend(
+                [
+                    getattr(self.agent, "role", "") or "",
+                    getattr(self.agent, "goal", "") or "",
+                    getattr(self.agent, "backstory", "") or "",
+                ]
+            )
+        for text_block in texts_to_scan:
+            for ident in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", text_block):
+                merged.setdefault(ident, f"{{{ident}}}")
+
+        if isinstance(inputs, dict):
+            for k, v in merged.items():
+                inputs.setdefault(k, v)
+
         self._crew_inputs = merged
         set_active_crew_inputs(self._crew_inputs)
         super().interpolate_inputs_and_add_conversation_history(merged)

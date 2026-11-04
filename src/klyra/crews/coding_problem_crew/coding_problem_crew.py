@@ -24,6 +24,8 @@ from klyra.models.task_outputs import (
 )
 from klyra.tools.code_execution_tool import RunCodeTool
 from klyra.tools.coding_source_tool import SearchCodingSourcesTool
+from klyra.tools.image_tools import SearchImagesTool
+from klyra.tools.latex_diagram_tool import GenerateDiagramTool, GenerateGraphTool
 from klyra.tools.leetcode_tool import SearchLeetCodeTool
 from klyra.tools.subject_fs_tool import WriteCodingPackageTool, WriteSubjectFileTool
 from klyra.tools.syllabus_tools import PyqSearchTool
@@ -54,6 +56,9 @@ class CodingProblemCrew:
                 SearchCodingSourcesTool(),
                 SearchLeetCodeTool(),
                 PyqSearchTool(),
+                SearchImagesTool(),
+                GenerateDiagramTool(),
+                GenerateGraphTool(),
                 WriteCodingPackageTool(),
                 WriteSubjectFileTool(),
             ],
@@ -65,7 +70,12 @@ class CodingProblemCrew:
     def coding_discrepancy_reviewer(self) -> Agent:
         return Agent(
             config=self.agents_config["coding_discrepancy_reviewer"],  # type: ignore[index]
-            tools=[SearchCodingSourcesTool(), SearchLeetCodeTool(), PyqSearchTool()],
+            tools=[
+                SearchCodingSourcesTool(),
+                SearchLeetCodeTool(),
+                PyqSearchTool(),
+                SearchImagesTool(),
+            ],
             llm=coding_llm(),
             verbose=True,
         )

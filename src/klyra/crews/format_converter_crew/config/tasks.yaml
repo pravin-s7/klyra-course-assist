@@ -8,11 +8,16 @@ convert_documents_task:
     unless the request says otherwise. Call the matching tool for each file;
     never hand-retype or rewrite content yourself, since the tools preserve
     math/tables/images exactly and a manual rewrite risks subtly altering
-    them. If the input is a question paper (filename ending in -qp.md), you
-    MUST call format_latex_as_exam on the resulting .tex file to convert it 
-    into the Overleaf exam class format before finishing. If
-    format_latex_as_exam is unavailable or fails, report the failure in your
-    output rather than delivering unconverted LaTeX.
+    them. If the input is a question paper (filename ending in -qp.md or
+    -qp-revised.md) or its paired answer key (-answer-key.md or
+    -answer-key-revised.md), convert_markdown_to_latex (and
+    format_latex_as_exam) automatically merges BOTH the question paper and
+    its corresponding answer key/solutions into a SINGLE unified Overleaf
+    `exam` class .tex file (containing `\question`, the exam `checkboxes`
+    environment with `\CorrectChoice`, `\textbf`, and the exam `solution`
+    environment in the same file, matching sample_latex_format.tex). Do NOT
+    produce separate disconnected .tex files for the question paper and
+    answer key.
 
     If convert_latex_to_markdown reports that raw LaTeX blocks survived
     (pandoc couldn't translate them, e.g. a raw tikzpicture), it gives you

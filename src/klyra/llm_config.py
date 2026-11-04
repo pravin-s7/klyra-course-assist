@@ -41,6 +41,14 @@ def coding_llm():
 
 
 def default_embedder():
+    try:
+        from google.api_core import client_options
+
+        if not hasattr(client_options.ClientOptions, "headers"):
+            setattr(client_options.ClientOptions, "headers", None)
+    except Exception:
+        pass
+
     provider = os.environ.get("EMBEDDING_PROVIDER", "default")
     if provider == "openai":
         return {
@@ -52,14 +60,12 @@ def default_embedder():
         }
 
     api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
-    # CrewAI's default Chroma storage for Knowledge strictly requires this env var
-    # when using the google-generativeai provider
     os.environ["CHROMA_GOOGLE_GENAI_API_KEY"] = api_key
-    
+    from klyra.tools.vector_store import _GoogleGenAIEmbeddingFunction
+
     return {
-        "provider": "google-generativeai",
+        "provider": "custom",
         "config": {
-            "api_key": api_key,
-            "model": "models/gemini-embedding-2",
+            "embedding_callable": _GoogleGenAIEmbeddingFunction,
         },
     }

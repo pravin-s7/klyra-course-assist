@@ -1,20 +1,22 @@
-version: '3.8'
-
 # YAML anchor for common service configurations to adhere to DRY principles
 x-klyra-common: &klyra-common
   build: .
   env_file:
     - .env
   environment:
+    - HOME=/tmp
+    - CREWAI_STORAGE_DIR=/tmp/crewai_storage
     - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
     - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-klyra}:${POSTGRES_PASSWORD:-klyrapass}@db:5432/${POSTGRES_DB:-klyradb}}
     - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
   volumes:
     - ./docs:/app/docs
-    # Local JSON storage for chat sessions. In a true production SaaS, 
-    # you would set KLYRA_SESSION_STORE=postgres to use the db service instead.
     - ./.db:/app/.db
+    # Share /tmp and docker.sock so Docker-outside-of-Docker code execution
+    # can bind-mount temporary /tmp/klyra-batch-* sandboxes into sibling containers
+    - /tmp:/tmp
+    - /var/run/docker.sock:/var/run/docker.sock
 
 services:
   web:
@@ -22,27 +24,34 @@ services:
     ports:
       - "${WEB_PORT:-8765}:8765"
     depends_on:
-      - redis
-      - db
-      - qdrant
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
 
   worker:
     <<: *klyra-common
     entrypoint: []
     command: celery -A klyra.celery_app worker --loglevel=${CELERY_LOGLEVEL:-info}
-    volumes:
-      - ./docs:/app/docs
-      # Mount docker socket for code execution validation (Docker-outside-of-Docker)
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - redis
-      - db
-      - qdrant
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
 
   redis:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   db:
     image: postgres:16-alpine
@@ -54,6 +63,11 @@ services:
       - "${DB_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-klyra} -d ${POSTGRES_DB:-klyradb}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -65,13 +79,11 @@ services:
   cli:
     <<: *klyra-common
     entrypoint: ["klyra"]
-    # Provide the CLI with docker socket access so it can trigger code validation if run directly via compose
-    volumes:
-      - ./docs:/app/docs
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - db
-      - qdrant
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
 
 volumes:
   postgres_data:

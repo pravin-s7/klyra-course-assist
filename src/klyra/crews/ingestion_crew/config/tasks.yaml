@@ -44,10 +44,13 @@ index_syllabus_task:
     Include the result of report_syllabus_gaps verbatim in your final
     answer if it was called.
 
-    CRITICAL: You MUST include the exact summary output you received from
-    the parse_documents_task at the beginning of your final answer, so the
-    user knows exactly what files were ingested across all categories
-    (including pyq, transcripts, additional, and weeks).
+    CRITICAL: You MUST include the folder/category status for all 4 categories
+    (weeks, pyq, transcripts, additional) from parse_documents_task and
+    report_syllabus_gaps in your final answer, so the user sees the exact
+    file and chunk counts across pyq, transcripts, additional, and weeks.
   expected_output: >
-    The exact parser summary from parse_documents_task, followed by a per-week concept count summary for "{subject}" and the explicit list of any missing/empty weeks (1-12) from report_syllabus_gaps.
+    The complete SyllabusIndexReportOutput including total_chunks_indexed,
+    weeks_covered, categories_indexed, missing_weeks (1-12), and indexing_notes
+    reporting the status of all 4 folder categories (weeks, pyq, transcripts,
+    additional).
   agent: syllabus_indexer

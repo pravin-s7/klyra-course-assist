@@ -48,6 +48,7 @@ from klyra.models.task_outputs import (
 )
 from klyra.services.skill_service import load_subject_skill
 from klyra.tools.code_execution_tool import (
+    DockerNotAvailableError,
     TestCaseSpec,
     docker_available,
     run_against_test_cases,
@@ -380,18 +381,54 @@ def extract_structured_model(
     )
 
 
+_MISSING_DIAGRAM_REF_RE = re.compile(
+    r"\b(?:shown\s+in\s+the\s+(?:diagram|figure|graph)|(?:diagram|figure|graph)\s+(?:shown\s+)?below|refer\s+to\s+the\s+(?:diagram|figure|graph)\s+below)\b",
+    re.IGNORECASE,
+)
+
+
 def _check_diagram_links(markdown_text: str, subject: str, root: Path = DOCS_ROOT) -> list[str]:
     """Verify that any relative image paths in `markdown_text` actually exist on disk."""
+    from klyra.utils.fs import subject_dir
+
     errors: list[str] = []
     gen_dir = generated_dir(subject, root=root)
+    subj_dir = subject_dir(subject, root=root)
     for match in _IMAGE_LINK_RE.finditer(markdown_text):
         rel_path = match.group(1).strip()
-        if rel_path.startswith(("http://", "https://", "data:")):
+        if rel_path.startswith(("http://", "https://", "data:", "/files/")):
             continue
-        resolved = (gen_dir / rel_path).resolve()
-        if not resolved.exists():
+        candidates = [
+            (gen_dir / rel_path).resolve(),
+            (gen_dir / "coding" / rel_path).resolve(),
+            (subj_dir / rel_path.lstrip("./")).resolve(),
+        ]
+        if not any(c.exists() for c in candidates):
             errors.append(
-                f"Broken or hallucinated diagram image path `{rel_path}` (resolved to `{resolved}`, which does not exist on disk). Use only exact `markdown_embed` paths returned by `extract_pdf_images` / `render_diagram`."
+                f"Broken or hallucinated diagram image path `{rel_path}` (resolved to `{candidates[0]}`, which does not exist on disk). Call `generate_diagram` or `generate_graph` and use only the exact markdown image link it returns."
+            )
+    return errors
+
+
+def _check_missing_question_diagrams(model: QuestionPaperOutput) -> list[str]:
+    """Ensure any question whose stem explicitly says 'shown in the diagram/figure/graph below'
+    actually embeds a rendered diagram when pdflatex is available."""
+    from klyra.tools.latex_diagram_tool import _pdflatex_path
+
+    if not _pdflatex_path():
+        return []
+    errors: list[str] = []
+    for q in model.questions:
+        has_img = bool(
+            (q.diagram_markdown and _IMAGE_LINK_RE.search(q.diagram_markdown))
+            or _IMAGE_LINK_RE.search(q.stem or "")
+        )
+        if not has_img and _MISSING_DIAGRAM_REF_RE.search(q.stem or ""):
+            errors.append(
+                f"Question {q.question_number} references a diagram/figure/graph below in its stem, "
+                "but `diagram_markdown` has no rendered image link. Call `generate_diagram` or "
+                "`generate_graph` with LaTeX/TikZ to render and visually verify the diagram, then "
+                "set `diagram_markdown` to the returned `![caption](...)` link."
             )
     return errors
 
@@ -403,6 +440,8 @@ def _finalize_guardrail_output(
     rendered_md = render_task_output_markdown(model, skill=skill)
     errors = verify_rendered_markdown(rendered_md, model, skill=skill)
     errors.extend(_check_diagram_links(rendered_md, skill.subject_id))
+    if isinstance(model, QuestionPaperOutput):
+        errors.extend(_check_missing_question_diagrams(model))
     if errors:
         return False, "Output failed subject format verification:\n- " + "\n- ".join(errors)
 
@@ -610,11 +649,83 @@ def _sanitize_student_readme(readme_text: str) -> str:
     return cleaned.strip() + "\n"
 
 
+def _load_on_disk_problem_specs(subject: str, pkg_name: str) -> list[CodingProblemSpec]:
+    """Load `CodingProblemSpec` entries from `{slug}-problems-revised.json` or `{slug}-problems.json` if present."""
+    if not pkg_name:
+        return []
+    from klyra.utils import fs
+
+    slug = fs.slugify(pkg_name)
+    coding_dir = generated_dir(subject) / "coding"
+    for candidate_name in (f"{slug}-problems-revised.json", f"{slug}-problems.json"):
+        candidate = coding_dir / candidate_name
+        if candidate.exists():
+            try:
+                parsed = CodingProblemSetOutput.model_validate_json(
+                    candidate.read_text(encoding="utf-8")
+                )
+                if parsed.problems:
+                    return list(parsed.problems)
+            except Exception:
+                pass
+    return []
+
+
+def _sync_problem_spec_to_disk(
+    prob: CodingProblemSpec,
+    subject: str,
+    package_name: str,
+    total_problems: int,
+    skill: SubjectSkillConfig | None = None,
+) -> None:
+    """Deterministically materialize `prob` into `docs/<subject>/generated/coding/<package_name>/`
+    (using `problem-<N>` subdirectory when `total_problems > 1`)."""
+    if not package_name or not prob.reference_solution.strip():
+        return
+    pub_tests = prob.public_tests or prob.sample_tests
+    priv_tests = prob.private_tests
+    if not pub_tests:
+        return
+
+    active_lang = str(get_active_crew_inputs().get("language") or "").strip().lower()
+    prob_lang = (prob.language or "").strip().lower()
+    if active_lang and (not prob_lang or (prob_lang == "python" and active_lang != "python")):
+        lang = active_lang
+    else:
+        lang = prob_lang or active_lang or "python"
+    if lang == "python" and re.search(r"\b(?:psycopg2|pg8000)\b", prob.reference_solution):
+        lang = "python-db"
+    prob.language = lang
+
+    readme_text = _sanitize_student_readme(render_coding_readme_markdown(prob, skill))
+    subdir = f"problem-{prob.problem_number}" if total_problems > 1 else None
+    pub_files = [
+        TestCaseFiles(input=tc.stdin_input, output=tc.expected_stdout)
+        for tc in pub_tests
+    ]
+    priv_files = [
+        TestCaseFiles(input=tc.stdin_input, output=tc.expected_stdout)
+        for tc in priv_tests
+    ]
+    writer = WriteCodingPackageTool()
+    writer._run(
+        subject=subject,
+        name=package_name,
+        language=lang,
+        readme=readme_text,
+        public_tests=pub_files,
+        private_tests=priv_files,
+        problem_subdir=subdir,
+        reference_solution=prob.reference_solution,
+    )
+
+
 def coding_problems_guardrail(task_output: TaskOutput) -> tuple[bool, Any]:
     """Guardrail for `generate_problems_task`."""
+    inputs = get_active_crew_inputs()
     subj = _active_subject()
     skill = _active_skill(subj)
-    pkg_name = str(get_active_crew_inputs().get("name") or "")
+    pkg_name = str(inputs.get("name") or "")
     model, err = extract_structured_model(
         task_output, CodingProblemSetOutput, subject=subj
     )
@@ -622,6 +733,23 @@ def coding_problems_guardrail(task_output: TaskOutput) -> tuple[bool, Any]:
         return False, err or "Failed to parse CodingProblemSetOutput."
     if not model.problems:
         return False, "CodingProblemSetOutput must contain at least 1 coding problem."
+
+    try:
+        expected_nq = int(inputs.get("num_questions") or 0)
+    except (TypeError, ValueError):
+        expected_nq = 0
+    if expected_nq > 1 and len(model.problems) < expected_nq:
+        return (
+            False,
+            f"Requested {expected_nq} coding problems (num_questions={expected_nq}), "
+            f"but `CodingProblemSetOutput.problems` only contains {len(model.problems)}. "
+            f"You MUST generate all {expected_nq} distinct coding problems.",
+        )
+
+    if len({p.problem_number for p in model.problems}) < len(model.problems):
+        for idx, p in enumerate(model.problems, start=1):
+            p.problem_number = idx
+
     total_probs = len(model.problems)
     for prob in model.problems:
         if not prob.reference_solution.strip():
@@ -630,6 +758,7 @@ def coding_problems_guardrail(task_output: TaskOutput) -> tuple[bool, Any]:
                 f"Problem {prob.problem_number} ('{prob.title}') is missing a runnable `reference_solution`.",
             )
         _backfill_problem_tests_from_disk(prob, subj, pkg_name, total_probs)
+        _sync_problem_spec_to_disk(prob, subj, pkg_name, total_probs, skill)
     return _finalize_guardrail_output(task_output, model, skill)
 
 
@@ -645,6 +774,25 @@ def revised_coding_problems_guardrail(task_output: TaskOutput) -> tuple[bool, An
         return False, err or "Failed to parse RevisedCodingProblemSetOutput."
     if not model.problems:
         return False, "RevisedCodingProblemSetOutput must contain at least 1 coding problem."
+
+    if len({p.problem_number for p in model.problems}) < len(model.problems):
+        for idx, p in enumerate(model.problems, start=1):
+            p.problem_number = idx
+
+    if pkg_name:
+        disk_specs = _load_on_disk_problem_specs(subj, pkg_name)
+        if len(disk_specs) > len(model.problems):
+            existing_nums = {p.problem_number for p in model.problems}
+            existing_titles = {p.title.strip().lower() for p in model.problems if p.title.strip()}
+            for spec in disk_specs:
+                if (
+                    spec.problem_number not in existing_nums
+                    and spec.title.strip().lower() not in existing_titles
+                ):
+                    model.problems.append(spec)
+                    existing_nums.add(spec.problem_number)
+            model.problems.sort(key=lambda p: p.problem_number)
+
     total_probs = len(model.problems)
     for prob in model.problems:
         if not prob.reference_solution.strip():
@@ -653,6 +801,7 @@ def revised_coding_problems_guardrail(task_output: TaskOutput) -> tuple[bool, An
                 f"Problem {prob.problem_number} ('{prob.title}') is missing a runnable `reference_solution`.",
             )
         _backfill_problem_tests_from_disk(prob, subj, pkg_name, total_probs)
+        _sync_problem_spec_to_disk(prob, subj, pkg_name, total_probs, skill)
     return _finalize_guardrail_output(task_output, model, skill)
 
 
@@ -760,49 +909,61 @@ def verify_and_sync_validated_problem(
                 run_kwargs["batch"] = True
         except (ValueError, TypeError):
             pass
-        exec_result = run_against_test_cases(**run_kwargs)
 
-        if not exec_result.compiled or exec_result.compile_error:
-            return (
-                False,
-                f"Problem {vp.problem_number} ('{vp.title}') FAILED compilation in `{lang}` sandbox:\n"
-                f"```text\n{exec_result.compile_error}\n```\n"
-                "Rewrite the `reference_solution` so it compiles cleanly without errors, re-run `execute_code_in_sandbox`, and return the updated result.",
+        try:
+            exec_result = run_against_test_cases(**run_kwargs)
+        except DockerNotAvailableError as exc:
+            exec_result = None
+            sandbox_ok = False
+            vp.sandbox_available = False
+            vp.execution_verified = False
+            vp.execution_summary = (
+                f"UNVERIFIED (Docker sandbox unavailable for `{lang}`: {exc}); "
+                f"{len(vp.public_tests)} public and {len(vp.private_tests)} private test cases recorded."
             )
 
-        total_cases = len(all_specs)
-        failed_details: list[str] = []
-        for (visibility, idx, tc), res in zip(test_labels, exec_result.results):
-            if not res.passed:
-                reason = (
-                    "TIMED OUT"
-                    if res.timed_out
-                    else f"exit_code={res.exit_code}"
-                    if res.exit_code != 0
-                    else "STDOUT MISMATCH"
-                )
-                failed_details.append(
-                    f"  - [{visibility.upper()} test #{idx}] {reason}:\n"
-                    f"    stdin_input:     {tc.stdin_input!r}\n"
-                    f"    expected_stdout: {res.expected!r}\n"
-                    f"    actual_stdout:   {res.stdout!r}\n"
-                    f"    stderr:          {res.stderr!r}"
+        if exec_result is not None:
+            if not exec_result.compiled or exec_result.compile_error:
+                return (
+                    False,
+                    f"Problem {vp.problem_number} ('{vp.title}') FAILED compilation in `{lang}` sandbox:\n"
+                    f"```text\n{exec_result.compile_error}\n```\n"
+                    "Rewrite the `reference_solution` so it compiles cleanly without errors, re-run `execute_code_in_sandbox`, and return the updated result.",
                 )
 
-        if failed_details:
-            return (
-                False,
-                f"Problem {vp.problem_number} ('{vp.title}') failed {len(failed_details)}/{total_cases} test cases in `{lang}` sandbox:\n"
-                + "\n".join(failed_details)
-                + "\n\nACTION REQUIRED: Inspect whether the `reference_solution` has a bug or a test case's `expected_stdout` was miscalculated. "
-                "Rewrite the broken `reference_solution` or test case, verify 100% pass rate with `execute_code_in_sandbox`, update the package with `write_coding_package`, and return the corrected output.",
+            total_cases = len(all_specs)
+            failed_details: list[str] = []
+            for (visibility, idx, tc), res in zip(test_labels, exec_result.results):
+                if not res.passed:
+                    reason = (
+                        "TIMED OUT"
+                        if res.timed_out
+                        else f"exit_code={res.exit_code}"
+                        if res.exit_code != 0
+                        else "STDOUT MISMATCH"
+                    )
+                    failed_details.append(
+                        f"  - [{visibility.upper()} test #{idx}] {reason}:\n"
+                        f"    stdin_input:     {tc.stdin_input!r}\n"
+                        f"    expected_stdout: {res.expected!r}\n"
+                        f"    actual_stdout:   {res.stdout!r}\n"
+                        f"    stderr:          {res.stderr!r}"
+                    )
+
+            if failed_details:
+                return (
+                    False,
+                    f"Problem {vp.problem_number} ('{vp.title}') failed {len(failed_details)}/{total_cases} test cases in `{lang}` sandbox:\n"
+                    + "\n".join(failed_details)
+                    + "\n\nACTION REQUIRED: Inspect whether the `reference_solution` has a bug or a test case's `expected_stdout` was miscalculated. "
+                    "Rewrite the broken `reference_solution` or test case, verify 100% pass rate with `execute_code_in_sandbox`, update the package with `write_coding_package`, and return the corrected output.",
+                )
+
+            vp.execution_verified = True
+            vp.execution_summary = (
+                f"Verified {exec_result.passed_count}/{total_cases} test cases passed in `{lang}` sandbox "
+                f"({len(vp.public_tests)} public, {len(vp.private_tests)} private)."
             )
-
-        vp.execution_verified = True
-        vp.execution_summary = (
-            f"Verified {exec_result.passed_count}/{total_cases} test cases passed in `{lang}` sandbox "
-            f"({len(vp.public_tests)} public, {len(vp.private_tests)} private)."
-        )
     else:
         vp.execution_verified = False
         vp.execution_summary = (
@@ -820,23 +981,33 @@ def verify_and_sync_validated_problem(
             root_readme = pkg_root / "README.md"
             if total_problems > 1 and sub_readme.exists():
                 readme_text = sub_readme.read_text(encoding="utf-8").strip()
-            elif root_readme.exists():
+            elif total_problems == 1 and root_readme.exists():
                 readme_text = root_readme.read_text(encoding="utf-8").strip()
             elif sub_readme.exists():
                 readme_text = sub_readme.read_text(encoding="utf-8").strip()
 
         if not readme_text:
-            spec = CodingProblemSpec(
-                problem_number=vp.problem_number,
-                title=vp.title or f"Problem {vp.problem_number}",
-                language=lang,
-                problem_statement=f"Solve {vp.title or f'Problem {vp.problem_number}'}.",
-                input_format="See sample test cases.",
-                output_format="See sample test cases.",
-                sample_tests=vp.public_tests[:2],
-                reference_solution=vp.reference_solution,
-            )
-            readme_text = render_coding_readme_markdown(spec, skill)
+            matched_spec: CodingProblemSpec | None = None
+            for spec_cand in _load_on_disk_problem_specs(subject, package_name):
+                if spec_cand.problem_number == vp.problem_number or (
+                    vp.title and spec_cand.title.strip().lower() == vp.title.strip().lower()
+                ):
+                    matched_spec = spec_cand
+                    break
+            if matched_spec is not None:
+                readme_text = render_coding_readme_markdown(matched_spec, skill)
+            else:
+                spec = CodingProblemSpec(
+                    problem_number=vp.problem_number,
+                    title=vp.title or f"Problem {vp.problem_number}",
+                    language=lang,
+                    problem_statement=f"Solve {vp.title or f'Problem {vp.problem_number}'}.",
+                    input_format="See sample test cases.",
+                    output_format="See sample test cases.",
+                    sample_tests=vp.public_tests[:2],
+                    reference_solution=vp.reference_solution,
+                )
+                readme_text = render_coding_readme_markdown(spec, skill)
         readme_text = _sanitize_student_readme(readme_text)
         vp.readme_markdown = readme_text
 
@@ -884,7 +1055,50 @@ def coding_test_cases_guardrail(task_output: TaskOutput) -> tuple[bool, Any]:
             "TestCaseValidationOutput contains 0 `validated_problems`. Every problem must be validated.",
         )
 
-    total_probs = len(model.validated_problems)
+    if len({vp.problem_number for vp in model.validated_problems}) < len(model.validated_problems):
+        for idx, vp in enumerate(model.validated_problems, start=1):
+            vp.problem_number = idx
+
+    disk_specs = _load_on_disk_problem_specs(subj, pkg_name) if pkg_name else []
+    if len(disk_specs) > len(model.validated_problems):
+        existing_nums = {vp.problem_number for vp in model.validated_problems}
+        existing_titles = {vp.title.strip().lower() for vp in model.validated_problems if vp.title.strip()}
+        for spec in disk_specs:
+            if (
+                spec.problem_number not in existing_nums
+                and spec.title.strip().lower() not in existing_titles
+            ):
+                _backfill_problem_tests_from_disk(spec, subj, pkg_name, len(disk_specs))
+                pub_tcs = spec.public_tests or spec.sample_tests
+                priv_tcs = spec.private_tests
+                if pub_tcs and priv_tcs and spec.reference_solution.strip():
+                    model.validated_problems.append(
+                        ValidatedProblemResult(
+                            problem_number=spec.problem_number,
+                            title=spec.title,
+                            language=spec.language,
+                            reference_solution=spec.reference_solution,
+                            readme_markdown=render_coding_readme_markdown(spec, skill),
+                            public_tests=pub_tcs,
+                            private_tests=priv_tcs,
+                        )
+                    )
+                    existing_nums.add(spec.problem_number)
+        model.validated_problems.sort(key=lambda vp: vp.problem_number)
+
+    try:
+        expected_nq = int(inputs.get("num_questions") or 0)
+    except (TypeError, ValueError):
+        expected_nq = 0
+    expected_total = max(len(model.validated_problems), len(disk_specs), expected_nq)
+    if expected_total > 1 and len(model.validated_problems) < expected_total:
+        return (
+            False,
+            f"Expected {expected_total} validated coding problems, but `TestCaseValidationOutput.validated_problems` "
+            f"only contains {len(model.validated_problems)}. You MUST validate and return all {expected_total} problems.",
+        )
+
+    total_probs = max(len(model.validated_problems), expected_total)
     for vp in model.validated_problems:
         ok, detail = verify_and_sync_validated_problem(
             vp=vp,
@@ -963,6 +1177,26 @@ def ingestion_parse_guardrail(task_output: TaskOutput) -> tuple[bool, Any]:
     )
     if err or model is None:
         return False, err or "Failed to parse DocumentParseReportOutput."
+    try:
+        from klyra.utils import fs
+
+        manifest = fs.load_manifest(subj)
+        all_files = fs.discover_subject_files(subj)
+        if not model.documents and manifest:
+            for f in all_files:
+                key = str(f.path)
+                if key in manifest:
+                    chunks_n = int(manifest[key].get("chunks", 0))
+                    model.documents.append(
+                        ParsedDocumentEntry(
+                            source_file=key,
+                            category=f.category,
+                            week=f.week,
+                            summary=f"Ingested ({chunks_n} chunks)",
+                        )
+                    )
+    except Exception:
+        pass
     return _finalize_guardrail_output(task_output, model, skill)
 
 
@@ -975,6 +1209,77 @@ def ingestion_index_guardrail(task_output: TaskOutput) -> tuple[bool, Any]:
     )
     if err or model is None:
         return False, err or "Failed to parse SyllabusIndexReportOutput."
+    try:
+        from klyra.utils import fs
+
+        manifest = fs.load_manifest(subj)
+        all_files = fs.discover_subject_files(subj)
+        gaps = fs.missing_weeks(subj)
+        covered_weeks = [w for w in range(1, fs.NUM_WEEKS + 1) if w not in gaps]
+
+        total_manifest_chunks = sum(
+            int(v.get("chunks", 0))
+            for v in manifest.values()
+            if isinstance(v, dict)
+        )
+        if model.total_chunks_indexed == 0 and total_manifest_chunks > 0:
+            model.total_chunks_indexed = total_manifest_chunks
+
+        if not model.weeks_covered and covered_weeks:
+            model.weeks_covered = covered_weeks
+
+        if not model.missing_weeks and gaps:
+            model.missing_weeks = gaps
+
+        cat_labels = {
+            "week": "weeks",
+            "pyq": "pyq",
+            "transcript": "transcripts",
+            "additional": "additional",
+        }
+        active_cats: list[str] = list(model.categories_indexed)
+        status_notes: list[str] = []
+        for cat_key in ("week", "pyq", "transcript", "additional"):
+            cat_files = [f for f in all_files if f.category == cat_key]
+            ingested = [f for f in cat_files if str(f.path) in manifest]
+            chunks_n = sum(
+                int(manifest.get(str(f.path), {}).get("chunks", 0))
+                for f in ingested
+            )
+            label = cat_labels[cat_key]
+            if ingested and label not in active_cats and cat_key not in active_cats:
+                active_cats.append(label)
+            if cat_key == "week":
+                w_str = ", ".join(str(w) for w in covered_weeks) if covered_weeks else "None"
+                status_notes.append(
+                    f"**weeks (`week_1..week_12`):** {len(cat_files)} file(s) on disk, "
+                    f"{len(ingested)} ingested ({chunks_n} chunks) | Covered weeks: {w_str}"
+                )
+            else:
+                folder_name = "transcripts" if cat_key == "transcript" else cat_key
+                status_notes.append(
+                    f"**{label} (`docs/{subj}/{folder_name}`):** {len(cat_files)} file(s) on disk, "
+                    f"{len(ingested)} ingested ({chunks_n} chunks)"
+                )
+        model.categories_indexed = active_cats
+        cleaned_existing = [
+            n
+            for n in model.indexing_notes
+            if n.strip()
+            and not n.strip().startswith("# ")
+            and not n.strip().startswith("Missing/empty weeks:")
+            and not n.strip().startswith("Folder / Category Status")
+            and not n.strip().startswith("- weeks:")
+            and not n.strip().startswith("- pyq:")
+            and not n.strip().startswith("- transcripts:")
+            and not n.strip().startswith("- additional:")
+        ]
+        for sn in status_notes:
+            if sn not in cleaned_existing:
+                cleaned_existing.append(sn)
+        model.indexing_notes = cleaned_existing
+    except Exception:
+        pass
     return _finalize_guardrail_output(task_output, model, skill)
 
 

@@ -101,32 +101,105 @@ async def static_file(filename: str):
     return Response(content=file_path.read_bytes(), media_type=ct)
 
 
+_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+    ".md": "text/markdown; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".tex": "text/plain; charset=utf-8",
+    ".py": "text/plain; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".yaml": "text/plain; charset=utf-8",
+    ".yml": "text/plain; charset=utf-8",
+}
+
+
+def _resolve_docs_file(path: str, user: UserRecord) -> tuple[Path | None, str]:
+    """Resolve a path relative to _DOCS_DIR, handling 'assets/' vs '.assets/' and bare '.assets/'."""
+    clean_path = path.lstrip("/")
+    if clean_path.startswith("docs/"):
+        clean_path = clean_path[len("docs/"):]
+
+    candidates: list[str] = [clean_path]
+    # Handle missing dot in .assets (e.g. 'ct/assets/generated/foo.png' -> 'ct/.assets/generated/foo.png')
+    if "/assets/" in clean_path and "/.assets/" not in clean_path:
+        candidates.append(clean_path.replace("/assets/", "/.assets/", 1))
+
+    # Handle bare '.assets/...' or 'assets/...' without subject prefix
+    if clean_path.startswith(".assets/") or clean_path.startswith("assets/"):
+        rest = clean_path.split("/", 1)[1] if "/" in clean_path else ""
+        if rest and _DOCS_DIR.exists():
+            for subj_dir in sorted(_DOCS_DIR.iterdir()):
+                if subj_dir.is_dir() and not subj_dir.name.startswith("."):
+                    if can_access_subject(user, subj_dir.name):
+                        candidates.append(f"{subj_dir.name}/.assets/{rest}")
+
+    docs_root = _DOCS_DIR.resolve()
+    for cand in candidates:
+        fp = (_DOCS_DIR / cand).resolve()
+        if str(fp).startswith(str(docs_root)) and fp.exists() and fp.is_file():
+            rel = fp.relative_to(docs_root).as_posix()
+            return fp, rel
+
+    # Fallback: return initial resolved path for standard 403/404 handling
+    fp = (_DOCS_DIR / clean_path).resolve()
+    return fp, clean_path
+
+
+@app.get("/.assets/{rest:path}")
+@app.get("/assets/{rest:path}")
+async def serve_bare_asset(rest: str, user: UserRecord = Depends(get_current_user)):
+    """Fallback route when Markdown contains relative '../.assets/...' links resolved against '/'."""
+    return await serve_file(f".assets/{rest}", preview=False, download=False, user=user)
+
+
 @app.get("/files/{path:path}")
-async def serve_file(path: str, preview: bool = False, user: UserRecord = Depends(get_current_user)):
-    """Serve generated files for download or preview (owner/course gated)."""
-    file_path = (_DOCS_DIR / path).resolve()
-    if not str(file_path).startswith(str(_DOCS_DIR.resolve())):
+async def serve_file(
+    path: str,
+    preview: bool = False,
+    download: bool = False,
+    user: UserRecord = Depends(get_current_user),
+):
+    """Serve generated files or assets for inline display, preview, or download (owner/course gated)."""
+    file_path, rel_path = _resolve_docs_file(path, user)
+    if file_path is None or not str(file_path).startswith(str(_DOCS_DIR.resolve())):
         return Response(status_code=403)
 
     # Access check BEFORE existence so we don't leak whether another
     # user's generated file exists.
-    if not can_read_generated_file(user, path):
+    if not can_read_generated_file(user, rel_path):
         return Response(status_code=403, content="You do not have access to this file")
 
     if not file_path.exists() or not file_path.is_file():
         return Response(status_code=404)
 
-    if preview:
+    suffix = file_path.suffix.lower()
+    is_image = suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+    media_type = _MIME_TYPES.get(suffix, "application/octet-stream")
+
+    if preview and not is_image:
         try:
             content = file_path.read_text(encoding="utf-8")
             return Response(content=content, media_type="text/plain; charset=utf-8")
         except Exception:
             return Response(status_code=400, content="Cannot preview binary file")
 
+    if download:
+        return FileResponse(
+            path=str(file_path),
+            filename=file_path.name,
+            media_type="application/octet-stream",
+        )
+
+    # Serve images and inline assets without forcing Content-Disposition: attachment
     return FileResponse(
         path=str(file_path),
-        filename=file_path.name,
-        media_type="application/octet-stream",
+        media_type=media_type,
     )
 
 
@@ -510,12 +583,16 @@ def _load_session_from_db(sid: str):
     if record is None:
         return None
     try:
+        raw_ui = record.ui_history_json
+        ui_hist = json.loads(raw_ui) if isinstance(raw_ui, str) else (raw_ui if isinstance(raw_ui, list) else [])
+        raw_gem = record.gemini_history_json
+        gem_hist = json.loads(raw_gem) if isinstance(raw_gem, str) else (raw_gem if isinstance(raw_gem, dict) else {})
         return {
             "owner_id": record.owner_id,
             "title": record.title,
             "pinned": record.pinned,
-            "ui_history": json.loads(record.ui_history_json or "[]"),
-            "gemini_history": json.loads(record.gemini_history_json or "{}"),
+            "ui_history": ui_hist,
+            "gemini_history": gem_hist,
         }
     except Exception as e:
         logger.error(f"Failed to load session {sid}: {e}")
@@ -904,27 +981,23 @@ async def _run_voice_session(ws: WebSocket, ref: dict, chat_history: list, orche
                         chat_history.append(start_event)
                         await safe_send_json(start_event)
 
+                        tool_start_time = time.time()
                         result = await executor.execute(fc.name, fc_args)
                         status = result.get("status", "error")
                         msg = result.get("message", "")
 
-                        # Register ownership of generated files created by this user
-                        if status == "success" and user is not None:
-                            try:
-                                subj = str(fc_args.get("subject", "")).lower()
-                                if subj:
-                                    gen_root = (Path("docs") / subj / "generated").resolve()
-                                    now = time.time()
-                                    for f in gen_root.rglob("*"):
-                                        if f.is_file() and (now - f.stat().st_mtime) < 120:
-                                            rel = f.relative_to(Path("docs")).as_posix()
-                                            repo.set_file_owner(rel, user.id, subj)
-                            except Exception as e:
-                                logger.debug("file-ownership tagging failed: %s", e)
-
                         done_event = {"type": "tool_done", "tool": fc.name, "status": status, "message": msg[:500]}
                         chat_history.append(done_event)
                         await safe_send_json(done_event)
+
+                        # Register ownership and emit file links (including generated diagrams)
+                        if status == "success" and orchestrator is not None:
+                            try:
+                                await orchestrator._detect_files(
+                                    fc.name, fc_args, msg, since_time=tool_start_time
+                                )
+                            except Exception as e:
+                                logger.debug("file detection/ownership tagging failed: %s", e)
 
                         # Append tool response to history so it's available if we switch back to text chat
                         orchestrator._history.append(

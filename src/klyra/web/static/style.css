@@ -1260,3 +1260,154 @@ body {
     color: var(--accent);
     background: var(--bg-hover);
 }
+
+/* ── Chat & Preview Image Rendering + Lightbox ─────────────────── */
+
+.file-card.file-card-image {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+
+.file-card-image-preview {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #ffffff;
+    border-radius: var(--radius-sm);
+    padding: 12px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.file-card-image-preview img,
+.message-bubble img,
+.doc-preview-content img {
+    max-width: 100%;
+    max-height: 420px;
+    height: auto;
+    display: block;
+    margin: 10px auto;
+    border-radius: var(--radius-sm);
+    background: #ffffff;
+    padding: 10px;
+    border: 1px solid var(--border);
+    cursor: zoom-in;
+    object-fit: contain;
+    transition: transform var(--transition), box-shadow var(--transition);
+}
+
+.file-card-image-preview img {
+    margin: 0 auto;
+    border: none;
+    padding: 0;
+}
+
+.message-bubble img:hover,
+.doc-preview-content img:hover,
+.file-card-image-preview img:hover {
+    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.25);
+}
+
+.doc-preview-content.markdown-rendered {
+    white-space: normal;
+    font-family: var(--font);
+    max-height: 560px;
+}
+
+.doc-preview-content.markdown-rendered h1,
+.doc-preview-content.markdown-rendered h2,
+.doc-preview-content.markdown-rendered h3,
+.doc-preview-content.markdown-rendered h4 {
+    margin-top: 14px;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.doc-preview-content.markdown-rendered p {
+    margin-bottom: 8px;
+}
+
+.doc-preview-content.markdown-rendered pre {
+    background: var(--bg-input);
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+    margin: 8px 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12.5px;
+}
+
+.doc-preview-content.markdown-rendered table,
+.message-bubble table {
+    border-collapse: collapse;
+    margin: 10px 0;
+    width: auto;
+    font-size: 13px;
+}
+
+.doc-preview-content.markdown-rendered th,
+.doc-preview-content.markdown-rendered td,
+.message-bubble th,
+.message-bubble td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.image-lightbox-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.82);
+    backdrop-filter: blur(6px);
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    animation: fadeIn 0.2s ease;
+}
+
+.image-lightbox-content {
+    position: relative;
+    max-width: 92vw;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+.image-lightbox-img {
+    max-width: 90vw;
+    max-height: 82vh;
+    background: #ffffff;
+    padding: 16px;
+    border-radius: var(--radius);
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+    object-fit: contain;
+}
+
+.image-lightbox-caption {
+    color: #f3f4f6;
+    font-size: 13px;
+    text-align: center;
+    max-width: 80vw;
+}
+
+.image-lightbox-close {
+    position: absolute;
+    top: -14px;
+    right: -14px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 15px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
