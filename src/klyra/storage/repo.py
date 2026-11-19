@@ -9,6 +9,8 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import func
+
 from klyra.storage.db import get_session_factory
 from klyra.storage.models import ChatSessionRecord, FileOwnershipRecord, UserRecord
 
@@ -47,8 +49,28 @@ def create_user(username: str, password_hash: str, role: str, courses: list[str]
 
 
 def get_user_by_username(username: str) -> UserRecord | None:
+    if not username:
+        return None
+    clean = username.strip().lower()
     with get_session_factory() as session:
-        return session.query(UserRecord).filter(UserRecord.username == username).first()
+        return (
+            session.query(UserRecord)
+            .filter(func.lower(UserRecord.username) == clean)
+            .first()
+        )
+
+
+def get_user_by_email(email: str) -> UserRecord | None:
+    if not email or not email.strip():
+        return None
+    clean = email.strip().lower()
+    with get_session_factory() as session:
+        return (
+            session.query(UserRecord)
+            .filter(UserRecord.email.isnot(None))
+            .filter(func.lower(UserRecord.email) == clean)
+            .first()
+        )
 
 
 def get_user_by_id(user_id: str) -> UserRecord | None:
@@ -67,11 +89,13 @@ def count_users() -> int:
 
 
 def update_user(user_id: str, **fields) -> UserRecord | None:
-    """Updatable fields: password_hash, role, courses, full_name, email."""
+    """Updatable fields: username, password_hash, role, courses, full_name, email."""
     with get_session_factory() as session:
         user = session.query(UserRecord).filter(UserRecord.id == user_id).first()
         if user is None:
             return None
+        if "username" in fields and fields["username"]:
+            user.username = fields["username"]
         if "password_hash" in fields:
             user.password_hash = fields["password_hash"]
         if "role" in fields:
@@ -82,6 +106,7 @@ def update_user(user_id: str, **fields) -> UserRecord | None:
             user.full_name = fields["full_name"]
         if "email" in fields:
             user.email = fields["email"]
+        user.modified_at = _now()
         session.add(user)
         return user
 
@@ -159,6 +184,7 @@ def save_chat_session(
             record.owner_id = owner_id
             if record.title == "New Chat" and title and title != "New Chat":
                 record.title = title
+        record.modified_at = _now()
         record.ui_history_json = _to_json_native(ui_history, [])
         record.gemini_history_json = _to_json_native(gemini_history, {})
         session.add(record)

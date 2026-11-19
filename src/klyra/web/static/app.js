@@ -3,11 +3,15 @@
 // ── State ─────────────────────────────────────────────────────────
 let ws = null;
 let isVoiceActive = false;
+let voiceResponseEnabled = false;
 let audioContext = null;
 let mediaStream = null;
 let scriptProcessor = null;
+let voiceSilenceGain = null;
 let playbackContext = null;
 let nextPlayTime = 0;
+let currentUserMessageEl = null;
+let currentUserText = '';
 let currentKlyraMessageEl = null;
 let currentKlyraText = '';
 let reconnectAttempts = 0;
@@ -17,6 +21,29 @@ const MAX_RECONNECT = 5;
 const chatInput = document.getElementById('chatInput');
 const sendBtn = document.getElementById('sendBtn');
 const micBtn = document.getElementById('micBtn');
+const attachImageBtn = document.getElementById('attachImageBtn');
+const chatImageInput = document.getElementById('chatImageInput');
+const chatAttachmentBar = document.getElementById('chatAttachmentBar');
+const chatComposerNotice = document.getElementById('chatComposerNotice');
+const chatInputContainer = document.getElementById('chatInputContainer');
+const chatScrollArea = document.getElementById('chatScrollArea');
+const inputBar = document.getElementById('inputBar');
+
+// Full-page Artifacts workspace view
+const sidebarArtifactsBtn = document.getElementById('sidebarArtifactsBtn');
+const artifactsView = document.getElementById('artifactsView');
+const backToChatBtn = document.getElementById('backToChatBtn');
+const artifactsRefreshBtn = document.getElementById('artifactsRefreshBtn');
+const artifactsCountBadge = document.getElementById('artifactsCountBadge');
+const artifactsSearchInput = document.getElementById('artifactsSearchInput');
+const artifactsSubjectFilter = document.getElementById('artifactsSubjectFilter');
+const artifactsTimePreset = document.getElementById('artifactsTimePreset');
+const artifactsGroupBy = document.getElementById('artifactsGroupBy');
+const artifactsResetFiltersBtn = document.getElementById('artifactsResetFiltersBtn');
+const artifactsCustomRange = document.getElementById('artifactsCustomRange');
+const artifactsDateFrom = document.getElementById('artifactsDateFrom');
+const artifactsDateTo = document.getElementById('artifactsDateTo');
+const artifactsListContainer = document.getElementById('artifactsListContainer');
 
 
 // Modals
@@ -56,10 +83,141 @@ const chatSessionsList = document.getElementById('chatSessionsList');
 // Shows the login overlay when there's no valid session; only after a
 // successful auth check do we open the WebSocket and load data.
 let currentUser = null;
+let accessibleSubjects = [];
+
+// Light-dismiss fallback for <dialog closedby="any">
+if (typeof HTMLDialogElement !== 'undefined' && !('closedBy' in HTMLDialogElement.prototype)) {
+    for (const dialog of document.querySelectorAll('dialog[closedby="any"]')) {
+        dialog.addEventListener('click', (event) => {
+            if (event.target !== dialog) return;
+            const rect = dialog.getBoundingClientRect();
+            const isDialogContent = (
+                rect.top <= event.clientY &&
+                event.clientY <= rect.top + rect.height &&
+                rect.left <= event.clientX &&
+                event.clientX <= rect.left + rect.width
+            );
+            if (isDialogContent) return;
+            dialog.close();
+        });
+    }
+}
+
+function formatChatTime(isoOrDate) {
+    try {
+        const d = isoOrDate ? new Date(isoOrDate) : new Date();
+        if (isNaN(d)) return '';
+        return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (e) {
+        return '';
+    }
+}
 
 function showLogin() {
     const overlay = document.getElementById('loginOverlay');
     if (overlay) overlay.style.display = 'flex';
+}
+
+let selectedSidebarSubject = null;
+
+function bindSidebarSectionPersistence(detailsEl, storageKey, defaultOpen = true) {
+    if (!detailsEl) return;
+    const saved = localStorage.getItem(storageKey);
+    detailsEl.open = saved === null ? defaultOpen : saved === 'true';
+    if (detailsEl.dataset.persistBound !== 'true') {
+        detailsEl.dataset.persistBound = 'true';
+        detailsEl.addEventListener('toggle', () => {
+            localStorage.setItem(storageKey, String(detailsEl.open));
+        });
+    }
+}
+
+function selectSidebarSubject(subject) {
+    selectedSidebarSubject = subject;
+    document.querySelectorAll('.sidebar-subject-tag').forEach((btn) => {
+        const isActive = btn.dataset.subject === subject;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-pressed', String(isActive));
+    });
+
+    const uploadSelect = document.getElementById('uploadSubject');
+    if (uploadSelect && Array.from(uploadSelect.options).some((o) => o.value === subject)) {
+        uploadSelect.value = subject;
+    }
+    const delSelect = document.getElementById('deleteSubject');
+    if (delSelect && Array.from(delSelect.options).some((o) => o.value === subject)) {
+        delSelect.value = subject;
+    }
+
+    if (typeof renderPendingChatAttachments === 'function' && pendingChatAttachments.length > 0) {
+        renderPendingChatAttachments();
+    }
+
+    if (artifactsView && !artifactsView.hidden) {
+        if (artifactsSubjectFilter && Array.from(artifactsSubjectFilter.options).some((o) => o.value === subject)) {
+            artifactsSubjectFilter.value = subject;
+            renderArtifactsView();
+        }
+        return;
+    }
+
+    if (chatInput) {
+        const currentVal = chatInput.value;
+        const prefixRegex = /^For [a-zA-Z0-9_-]+:\s*/;
+        if (!currentVal.trim()) {
+            chatInput.value = `For ${subject}: `;
+        } else if (prefixRegex.test(currentVal)) {
+            chatInput.value = currentVal.replace(prefixRegex, `For ${subject}: `);
+        } else if (!currentVal.toLowerCase().includes(subject.toLowerCase())) {
+            chatInput.value = `For ${subject}: ${currentVal}`;
+        }
+        chatInput.focus();
+        chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+        chatInput.dispatchEvent(new Event('input'));
+    }
+}
+
+function renderAssignedCoursesUI(user, discoveredSubjects = []) {
+    if (!user) return;
+    const isAdmin = user.role === 'admin';
+    const assigned = isAdmin
+        ? (discoveredSubjects.length ? discoveredSubjects : (user.courses || []))
+        : (user.courses || []);
+
+    const section = document.getElementById('sidebarSubjectsSection');
+    const titleEl = document.getElementById('sidebarSubjectsTitle');
+    const countEl = document.getElementById('sidebarSubjectsCount');
+    const listEl = document.getElementById('sidebarSubjectsList');
+    if (!section || !listEl) return;
+
+    bindSidebarSectionPersistence(section, 'klyra_sidebar_subjects', true);
+
+    if (titleEl) {
+        titleEl.textContent = isAdmin ? 'All Subjects' : 'Assigned Subjects';
+    }
+    if (countEl) {
+        countEl.textContent = String(assigned.length);
+    }
+
+    listEl.innerHTML = '';
+    if (assigned.length === 0) {
+        const empty = document.createElement('span');
+        empty.className = 'sidebar-subject-empty';
+        empty.textContent = isAdmin ? 'No subjects found' : 'No subjects assigned';
+        listEl.appendChild(empty);
+        return;
+    }
+
+    assigned.forEach((subj) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'sidebar-subject-tag' + (selectedSidebarSubject === subj ? ' active' : '');
+        btn.dataset.subject = subj;
+        btn.setAttribute('aria-pressed', String(selectedSidebarSubject === subj));
+        btn.textContent = subj;
+        btn.addEventListener('click', () => selectSidebarSubject(subj));
+        listEl.appendChild(btn);
+    });
 }
 
 function showUserBadge(user) {
@@ -72,6 +230,7 @@ function showUserBadge(user) {
         ? 'Admin — access to all courses'
         : 'Courses: ' + ((user.courses || []).join(', ') || 'none assigned');
     badge.style.display = 'flex';
+    renderAssignedCoursesUI(user, accessibleSubjects);
 
     // Admins get a link to the user-management panel
     let adminLink = document.getElementById('adminPanelLink');
@@ -84,7 +243,7 @@ function showUserBadge(user) {
         adminLink.style.marginRight = '4px';
         adminLink.style.textDecoration = 'none';
         adminLink.innerHTML =
-            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+            '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
             'stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect>' +
             '<rect x="14" y="3" width="7" height="7"></rect>' +
             '<rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>';
@@ -186,25 +345,50 @@ function getSessionId() {
 }
 
 function switchSession(sid) {
+    if (isVoiceActive) {
+        stopVoice();
+    }
+    if (typeof hideArtifactsView === 'function') {
+        hideArtifactsView();
+    }
     localStorage.setItem(sessionStorageKey(), sid);
-    
-    // Clear the chat UI locally
-    messages.innerHTML = '';
+
+    // Clear message bubbles while keeping #welcomeScreen attached
+    Array.from(messages.childNodes).forEach((node) => {
+        if (node.id !== 'welcomeScreen') {
+            node.remove();
+        }
+    });
+    if (welcomeScreen && !messages.contains(welcomeScreen)) {
+        messages.appendChild(welcomeScreen);
+    }
+    if (welcomeScreen) {
+        welcomeScreen.style.display = 'flex';
+    }
+
+    currentUserMessageEl = null;
+    currentUserText = '';
     currentKlyraMessageEl = null;
     currentKlyraText = '';
+    isGenerating = false;
+    updateSendButton();
+    hideTypingIndicator();
     if (window.toolCounters) window.toolCounters = {};
-    
-    // Show welcome screen
-    welcomeScreen.style.display = 'flex';
-    
-    // Reconnect websocket
+
+    // Cleanly reconnect WebSocket to the target session
+    reconnectAttempts = 0;
     if (ws) {
         ws.onclose = null; // Prevent disconnected UI/auto-reconnect from old socket
         ws.onerror = null;
-        ws.close();
+        try {
+            ws.close();
+        } catch (e) {
+            // ignore
+        }
+        ws = null;
     }
     connect();
-    
+
     // Update the sidebar highlighting
     fetchSessions();
 }
@@ -233,8 +417,9 @@ function connect() {
 
     ws.onmessage = (event) => {
         if (event.data instanceof Blob) {
-            // Binary = audio from Klyra voice
-            playAudioChunk(event.data);
+            if (voiceResponseEnabled && playbackContext) {
+                playAudioChunk(event.data);
+            }
             return;
         }
 
@@ -262,29 +447,44 @@ function setConnectionStatus(state, text) {
 function handleServerMessage(msg) {
     switch (msg.type) {
         case 'klyra_text':
+            currentUserMessageEl = null;
+            currentUserText = '';
             hideWelcome();
             hideTypingIndicator();
             if (!currentKlyraMessageEl) {
-                currentKlyraMessageEl = addMessage('klyra', '');
+                currentKlyraMessageEl = addMessage('klyra', '', msg.timestamp);
             }
             currentKlyraText += msg.text;
-            updateMessageContent(currentKlyraMessageEl, currentKlyraText);
+            updateMessageContent(currentKlyraMessageEl, currentKlyraText, true);
             scrollToBottom();
             break;
 
         case 'user_transcript':
             hideWelcome();
-            if (msg.final) {
-                addMessage('user', msg.text);
+            if (msg.streaming) {
+                if (!currentUserMessageEl) {
+                    currentUserMessageEl = addMessage('user', '', msg.timestamp);
+                }
+                currentUserText += msg.text;
+                updateMessageContent(currentUserMessageEl, currentUserText);
+                scrollToBottom();
+            } else if (msg.final) {
+                if (!currentUserMessageEl) {
+                    addMessage('user', msg.text, msg.timestamp, msg.attachments || null);
+                }
+                currentUserMessageEl = null;
+                currentUserText = '';
                 scrollToBottom();
             }
             break;
 
         case 'klyra_transcript':
+            currentUserMessageEl = null;
+            currentUserText = '';
             hideWelcome();
             hideTypingIndicator();
             if (!currentKlyraMessageEl) {
-                currentKlyraMessageEl = addMessage('klyra', '');
+                currentKlyraMessageEl = addMessage('klyra', '', msg.timestamp);
             }
             currentKlyraText += msg.text;
             updateMessageContent(currentKlyraMessageEl, currentKlyraText);
@@ -292,6 +492,8 @@ function handleServerMessage(msg) {
             break;
 
         case 'tool_start':
+            currentUserMessageEl = null;
+            currentUserText = '';
             if (!window.toolCounters) window.toolCounters = {};
             if (window.toolCounters[msg.tool] === undefined) window.toolCounters[msg.tool] = 0;
             window.toolCounters[msg.tool]++;
@@ -319,6 +521,12 @@ function handleServerMessage(msg) {
             break;
 
         case 'turn_complete':
+            if (currentKlyraMessageEl && window.MathJax && window.MathJax.typesetPromise) {
+                const elToTypeset = currentKlyraMessageEl;
+                MathJax.typesetPromise([elToTypeset]).catch(err => console.log(err));
+            }
+            currentUserMessageEl = null;
+            currentUserText = '';
             currentKlyraMessageEl = null;
             currentKlyraText = '';
             hideTypingIndicator();
@@ -329,6 +537,32 @@ function handleServerMessage(msg) {
 
         case 'voice_started':
             micBtn.classList.add('active');
+            voiceResponseEnabled = Boolean(msg.voice_response);
+            if (voiceResponseEnabled) {
+                if (!playbackContext) {
+                    playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+                    nextPlayTime = 0;
+                }
+                if (playbackContext.state === 'suspended') {
+                    playbackContext.resume().catch(() => {});
+                }
+            } else if (playbackContext) {
+                try { playbackContext.close(); } catch (_) {}
+                playbackContext = null;
+                nextPlayTime = 0;
+            }
+            break;
+
+        case 'voice_interrupted':
+            if (playbackContext) {
+                try { playbackContext.close(); } catch (_) {}
+                playbackContext = voiceResponseEnabled
+                    ? new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 })
+                    : null;
+            }
+            nextPlayTime = 0;
+            currentKlyraMessageEl = null;
+            currentKlyraText = '';
             break;
 
         case 'voice_stopped':
@@ -351,7 +585,7 @@ function hideWelcome() {
     }
 }
 
-function addMessage(role, text) {
+function addMessage(role, text, timestamp = null, attachments = null) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
 
@@ -360,13 +594,87 @@ function addMessage(role, text) {
 
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    bubble.innerHTML = renderMarkdown(text);
+    const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+    if (hasAttachments) {
+        const attGrid = document.createElement('div');
+        attGrid.className = 'message-attachments';
+        const downloadIconSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+        attachments.forEach((att) => {
+            const fileUrl = att.url || '';
+            const previewUrl = att.preview_url || fileUrl;
+            const name = att.name || 'artifact';
+            const dotIdx = name.lastIndexOf('.');
+            const ext = (att.file_type || (dotIdx >= 0 ? name.slice(dotIdx) : '')).toLowerCase();
+            const isImg = Boolean(
+                att.is_image !== undefined
+                    ? att.is_image
+                    : (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext)
+                        || (att.mime_type && String(att.mime_type).startsWith('image/')))
+            );
+
+            if (isImg) {
+                const card = document.createElement('div');
+                card.className = 'message-attachment-card';
+
+                const img = document.createElement('img');
+                img.src = fileUrl;
+                img.alt = name;
+                img.loading = 'lazy';
+                img.title = `${name} — Click to enlarge`;
+                img.addEventListener('click', () => {
+                    if (typeof openImageLightbox === 'function') {
+                        openImageLightbox(fileUrl, name);
+                    } else {
+                        window.open(previewUrl, '_blank', 'noopener');
+                    }
+                });
+
+                const meta = document.createElement('div');
+                meta.className = 'message-attachment-meta';
+                meta.innerHTML = `
+                    <a href="${escapeHtml(previewUrl)}" target="_blank" rel="noopener" class="message-attachment-name" title="Preview in new tab">${escapeHtml(name)}</a>
+                    <a href="${escapeHtml(fileUrl)}" download="${escapeHtml(name)}" class="message-attachment-dl-icon" title="Download ${escapeHtml(name)}" aria-label="Download ${escapeHtml(name)}">${downloadIconSvg}</a>
+                `;
+
+                card.appendChild(img);
+                card.appendChild(meta);
+                attGrid.appendChild(card);
+            } else {
+                const badgeText = (ext.replace(/^\./, '').toUpperCase() || 'FILE').slice(0, 5);
+                const chip = document.createElement('div');
+                chip.className = 'message-attachment-file-card';
+                chip.innerHTML = `
+                    <span class="message-attachment-ext">${escapeHtml(badgeText)}</span>
+                    <a href="${escapeHtml(previewUrl)}" target="_blank" rel="noopener" class="message-attachment-name" title="Preview in new tab">${escapeHtml(name)}</a>
+                    <a href="${escapeHtml(fileUrl)}" download="${escapeHtml(name)}" class="message-attachment-dl-icon" title="Download ${escapeHtml(name)}" aria-label="Download ${escapeHtml(name)}">${downloadIconSvg}</a>
+                `;
+                attGrid.appendChild(chip);
+            }
+        });
+        bubble.appendChild(attGrid);
+
+        if (text && String(text).trim()) {
+            const textWrap = document.createElement('div');
+            textWrap.className = 'message-text-body';
+            textWrap.innerHTML = renderMarkdown(text);
+            bubble.appendChild(textWrap);
+        }
+    } else {
+        bubble.innerHTML = renderMarkdown(text);
+    }
     if (window.MathJax && window.MathJax.typesetPromise) {
         MathJax.typesetPromise([bubble]).catch(err => console.log(err));
     }
 
     const actions = document.createElement('div');
     actions.className = 'message-actions';
+
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'message-timestamp';
+    const formattedTs = formatChatTime(timestamp);
+    tsSpan.textContent = formattedTs;
+    tsSpan.title = timestamp || new Date().toISOString();
+    actions.appendChild(tsSpan);
 
     const copyBtn = document.createElement('button');
     copyBtn.className = 'action-btn';
@@ -376,7 +684,7 @@ function addMessage(role, text) {
 
     copyBtn.innerHTML = copyIcon;
     copyBtn.onclick = () => {
-        navigator.clipboard.writeText(text).then(() => {
+        navigator.clipboard.writeText(bubble.textContent || text).then(() => {
             copyBtn.innerHTML = checkIcon;
             setTimeout(() => copyBtn.innerHTML = copyIcon, 2000);
         });
@@ -391,10 +699,10 @@ function addMessage(role, text) {
     return bubble;
 }
 
-function updateMessageContent(bubbleEl, text) {
+function updateMessageContent(bubbleEl, text, streaming = false) {
     if (bubbleEl) {
         bubbleEl.innerHTML = renderMarkdown(text);
-        if (window.MathJax && window.MathJax.typesetPromise) {
+        if (!streaming && window.MathJax && window.MathJax.typesetPromise) {
             MathJax.typesetPromise([bubbleEl]).catch(err => console.log(err));
         }
     }
@@ -492,9 +800,14 @@ function addFileCard(name, url, fileType) {
 
     const previewable = ['.md', '.txt', '.tex', '.py', '.json', '.yaml', '.yml', ...imageExts];
     const canPreview = previewable.includes(ext);
+    const isZipBundle = url.startsWith('/api/download/') || ext === '.zip';
+    const newTabPreviewHref = (!isZipBundle && url.startsWith('/files/'))
+        ? `/preview/${url.slice('/files/'.length)}`
+        : url;
 
-    const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
-    const downloadSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+    const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+    const newTabSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
+    const downloadSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
 
     const downloadHref = url.startsWith('/api/download/') ? url : `${url}?download=true`;
     div.innerHTML = `
@@ -502,12 +815,13 @@ function addFileCard(name, url, fileType) {
             <div style="display: flex; align-items: center; gap: 12px; cursor: default;">
                 <span class="file-icon" style="display:flex; align-items:center; color: var(--text-muted);">${icon}</span>
                 <div class="file-info">
-                    <a href="${downloadHref}" download="${escapeHtml(name)}" class="file-name" style="color: inherit; text-decoration: none;">${escapeHtml(name)}</a>
+                    <a href="${isZipBundle ? downloadHref : newTabPreviewHref}" ${isZipBundle ? `download="${escapeHtml(name)}"` : 'target="_blank" rel="noopener"'} class="file-name" style="color: inherit; text-decoration: none;" title="${isZipBundle ? 'Download ZIP' : 'Preview in new tab'}">${escapeHtml(name)}</a>
                     <span class="file-type">${ext.replace('.', '')}</span>
                 </div>
             </div>
             <div class="file-card-actions">
-                ${canPreview ? `<a href="#" class="preview-link" title="${isImage ? 'Toggle Image Display' : 'Preview'}" style="display:flex; align-items:center;">${eyeSvg}</a>` : ''}
+                ${canPreview ? `<a href="#" class="preview-link" title="${isImage ? 'Toggle Inline Image' : 'Inline Preview'}" style="display:flex; align-items:center;">${eyeSvg}</a>` : ''}
+                ${!isZipBundle ? `<a href="${newTabPreviewHref}" target="_blank" rel="noopener" title="Preview in new tab" style="display:flex; align-items:center;">${newTabSvg}</a>` : ''}
                 <a href="${downloadHref}" download="${escapeHtml(name)}" title="Download" style="display:flex; align-items:center;">${downloadSvg}</a>
             </div>
         </div>
@@ -535,7 +849,7 @@ function addFileCard(name, url, fileType) {
                 const content = await resp.text();
                 addDocPreview(name, content, div, url);
             } catch (err) {
-                window.open(url, '_blank');
+                window.open(newTabPreviewHref, '_blank');
             }
         });
     }
@@ -654,28 +968,263 @@ function updateSendButton() {
     }
 }
 
-// ── Send message ──────────────────────────────────────────────────
-function sendMessage() {
-    if (isGenerating) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'chat_stop' }));
-        }
+// ── Chat file & image attachments ─────────────────────────────────
+const CHAT_IMAGE_ALLOWED_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
+const CHAT_FILE_ALLOWED_EXTS = new Set([
+    '.pdf', '.txt', '.md', '.doc', '.docx', '.csv', '.json', '.tex',
+    '.py', '.c', '.cpp', '.h', '.java', '.js', '.ts', '.sql', '.sh',
+    '.bash', '.yaml', '.yml', '.xml', '.html', '.css', '.pptx', '.xlsx', '.rtf',
+]);
+const CHAT_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024;
+const CHAT_ARTIFACT_MAX_COUNT = 10;
+let pendingChatAttachments = [];
+let isUploadingChatAttachments = false;
+let composerNoticeTimer = null;
+
+function showComposerNotice(message, isError = true) {
+    if (!chatComposerNotice) {
+        console.warn(message);
         return;
     }
-    const text = chatInput.value.trim();
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+    chatComposerNotice.textContent = message;
+    chatComposerNotice.classList.toggle('error', isError);
+    chatComposerNotice.hidden = false;
+    if (composerNoticeTimer) clearTimeout(composerNoticeTimer);
+    composerNoticeTimer = setTimeout(() => {
+        chatComposerNotice.hidden = true;
+    }, 6000);
+}
 
+function formatBytesShort(bytes) {
+    if (!bytes || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileExtension(filename) {
+    const dotIdx = (filename || '').lastIndexOf('.');
+    return dotIdx >= 0 ? filename.slice(dotIdx).toLowerCase() : '';
+}
+
+function isImageFile(file) {
+    if (!file) return false;
+    if (file.type && file.type.startsWith('image/')) return true;
+    return CHAT_IMAGE_ALLOWED_EXTS.has(getFileExtension(file.name));
+}
+
+function isSupportedChatArtifact(file) {
+    if (!file) return false;
+    if (isImageFile(file)) return true;
+    const ext = getFileExtension(file.name);
+    if (CHAT_FILE_ALLOWED_EXTS.has(ext)) return true;
+    if (file.type && (file.type.startsWith('text/') || file.type === 'application/pdf' || file.type === 'application/json')) {
+        return true;
+    }
+    return false;
+}
+
+function renderPendingChatAttachments() {
+    if (!chatAttachmentBar) return;
+    if (pendingChatAttachments.length === 0) {
+        chatAttachmentBar.hidden = true;
+        chatAttachmentBar.innerHTML = '';
+        return;
+    }
+    chatAttachmentBar.hidden = false;
+    chatAttachmentBar.innerHTML = '';
+
+    const list = document.createElement('div');
+    list.className = 'chat-attachment-list';
+    pendingChatAttachments.forEach((item, idx) => {
+        const chip = document.createElement('div');
+        chip.className = 'chat-attachment-item';
+        const previewHtml = item.isImage && item.objectUrl
+            ? `<img src="${escapeHtml(item.objectUrl)}" alt="${escapeHtml(item.name)}" class="chat-attachment-thumb">`
+            : `<span class="chat-attachment-file-badge">${escapeHtml((item.ext.replace(/^\./, '').toUpperCase() || 'FILE').slice(0, 5))}</span>`;
+        chip.innerHTML = `
+            ${previewHtml}
+            <div class="chat-attachment-info">
+                <span class="chat-attachment-filename" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+                <span class="chat-attachment-sub">${escapeHtml(formatBytesShort(item.size))}${selectedSidebarSubject ? ` · ${escapeHtml(selectedSidebarSubject)}` : ''}</span>
+            </div>
+            <button type="button" class="chat-attachment-remove" title="Remove attachment" aria-label="Remove ${escapeHtml(item.name)}">&times;</button>
+        `;
+        chip.querySelector('.chat-attachment-remove').addEventListener('click', () => {
+            if (item.objectUrl) URL.revokeObjectURL(item.objectUrl);
+            pendingChatAttachments.splice(idx, 1);
+            renderPendingChatAttachments();
+        });
+        list.appendChild(chip);
+    });
+    chatAttachmentBar.appendChild(list);
+}
+
+function clearPendingChatAttachments() {
+    pendingChatAttachments.forEach((item) => {
+        if (item.objectUrl) URL.revokeObjectURL(item.objectUrl);
+    });
+    pendingChatAttachments = [];
+    renderPendingChatAttachments();
+}
+
+function addPendingChatFiles(fileList) {
+    if (!fileList || !fileList.length) return;
+    for (const file of Array.from(fileList)) {
+        if (pendingChatAttachments.length >= CHAT_ARTIFACT_MAX_COUNT) {
+            showComposerNotice(`Maximum ${CHAT_ARTIFACT_MAX_COUNT} attachments per message.`);
+            break;
+        }
+        if (!isSupportedChatArtifact(file)) {
+            showComposerNotice(`Unsupported file "${file.name}". Attach images or documents (PDF, TXT, MD, DOC, DOCX, CSV, JSON, TEX, code).`);
+            continue;
+        }
+        if (file.size > CHAT_ARTIFACT_MAX_BYTES) {
+            showComposerNotice(`File "${file.name}" exceeds the 25 MB limit.`);
+            continue;
+        }
+        const img = isImageFile(file);
+        pendingChatAttachments.push({
+            file,
+            name: file.name || (img ? `image-${Date.now()}.png` : `file-${Date.now()}.txt`),
+            ext: getFileExtension(file.name) || (img ? '.png' : ''),
+            size: file.size || 0,
+            isImage: img,
+            objectUrl: img ? URL.createObjectURL(file) : null,
+        });
+    }
+    renderPendingChatAttachments();
+}
+
+if (attachImageBtn && chatImageInput) {
+    attachImageBtn.addEventListener('click', () => {
+        chatImageInput.click();
+    });
+    chatImageInput.addEventListener('change', (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            addPendingChatFiles(e.target.files);
+            chatImageInput.value = '';
+            chatInput.focus();
+        }
+    });
+}
+
+if (chatInput) {
+    chatInput.addEventListener('paste', (e) => {
+        const items = e.clipboardData && e.clipboardData.items ? Array.from(e.clipboardData.items) : [];
+        const pastedFiles = items
+            .filter((it) => it.kind === 'file')
+            .map((it) => it.getAsFile())
+            .filter((f) => f && isSupportedChatArtifact(f));
+        if (pastedFiles.length > 0) {
+            e.preventDefault();
+            addPendingChatFiles(pastedFiles);
+        }
+    });
+}
+
+if (chatInputContainer) {
+    chatInputContainer.addEventListener('dragover', (e) => {
+        if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+            e.preventDefault();
+            chatInputContainer.classList.add('drag-over');
+        }
+    });
+    chatInputContainer.addEventListener('dragleave', () => {
+        chatInputContainer.classList.remove('drag-over');
+    });
+    chatInputContainer.addEventListener('drop', (e) => {
+        chatInputContainer.classList.remove('drag-over');
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            e.preventDefault();
+            addPendingChatFiles(e.dataTransfer.files);
+        }
+    });
+}
+
+// ── Send message (unified for text + voice + attachments) ─────────
+async function uploadPendingChatAttachments() {
+    if (pendingChatAttachments.length === 0) return [];
+    const uploadedAttachments = [];
+    isUploadingChatAttachments = true;
+    if (attachImageBtn) attachImageBtn.disabled = true;
+    if (sendBtn) sendBtn.disabled = true;
+    try {
+        const subjectForUpload = selectedSidebarSubject || '';
+        const activeSid = typeof getSessionId === 'function' ? (getSessionId() || '') : '';
+        for (const item of pendingChatAttachments) {
+            const formData = new FormData();
+            formData.append('file', item.file, item.name);
+            formData.append('subject', subjectForUpload);
+            formData.append('session_id', activeSid);
+            const resp = await fetch('/api/chat/artifacts/upload', {
+                method: 'POST',
+                body: formData,
+            });
+            if (!resp.ok) {
+                const errData = await resp.json().catch(() => ({}));
+                throw new Error(errData.detail || `Failed to upload ${item.name} (HTTP ${resp.status})`);
+            }
+            uploadedAttachments.push(await resp.json());
+        }
+        clearPendingChatAttachments();
+        return uploadedAttachments;
+    } finally {
+        isUploadingChatAttachments = false;
+        if (attachImageBtn) attachImageBtn.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+    }
+}
+
+function dispatchChatMessage(text, uploadedAttachments = []) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showComposerNotice('Not connected to server.');
+        return false;
+    }
     hideWelcome();
-    addMessage('user', text);
+    addMessage('user', text, null, uploadedAttachments.length > 0 ? uploadedAttachments : null);
     showTypingIndicator();
     scrollToBottom();
 
     isGenerating = true;
     updateSendButton();
 
-    ws.send(JSON.stringify({ type: 'chat', text }));
+    const payload = { type: 'chat', text };
+    if (uploadedAttachments.length > 0) {
+        payload.attachments = uploadedAttachments;
+    }
+    ws.send(JSON.stringify(payload));
     chatInput.value = '';
     chatInput.style.height = 'auto';
+    return true;
+}
+
+async function sendMessage() {
+    if (isGenerating) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'chat_stop' }));
+        }
+        return;
+    }
+    if (isVoiceActive) {
+        stopVoice();
+    }
+    if (isUploadingChatAttachments) return;
+    const text = chatInput.value.trim();
+    const hasPendingFiles = pendingChatAttachments.length > 0;
+    if ((!text && !hasPendingFiles) || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    let uploadedAttachments = [];
+    if (hasPendingFiles) {
+        try {
+            uploadedAttachments = await uploadPendingChatAttachments();
+        } catch (err) {
+            showComposerNotice(`Attachment upload failed: ${err.message}`);
+            return;
+        }
+    }
+
+    dispatchChatMessage(text, uploadedAttachments);
 }
 
 function sendQuickAction(text) {
@@ -683,45 +1232,61 @@ function sendQuickAction(text) {
     sendMessage();
 }
 
-// ── Voice ─────────────────────────────────────────────────────────
+// ── Voice (Gemini Live API streaming; audio output enabled via CLI --voice-response) ─
 async function startVoice() {
     if (isVoiceActive) {
         stopVoice();
         return;
     }
 
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        addMessage('klyra', '⚠️ Not connected to server yet. Please wait a moment and try voice again.');
+        return;
+    }
+
     try {
-        // Request mic access
+        // Pre-warm playback AudioContext inside the click gesture so browser autoplay
+        // allows spoken audio immediately if `--voice-response` is enabled on the server.
+        if (!playbackContext) {
+            playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            nextPlayTime = 0;
+        }
+        if (playbackContext.state === 'suspended') {
+            await playbackContext.resume().catch(() => {});
+        }
+
         mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { channelCount: 1, echoCancellation: true }
+            audio: { channelCount: 1, echoCancellation: true },
         });
 
         const track = mediaStream.getAudioTracks()[0];
         const settings = track.getSettings();
         const streamRate = settings.sampleRate;
         const ctxOptions = streamRate ? { sampleRate: streamRate } : undefined;
-        
-        // Set up audio capture using the stream's exact sample rate
+
         audioContext = new (window.AudioContext || window.webkitAudioContext)(ctxOptions);
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume().catch(() => {});
+        }
         const nativeSampleRate = audioContext.sampleRate;
         const targetSampleRate = 16000;
-        
-        const source = audioContext.createMediaStreamSource(mediaStream);
 
-        // ScriptProcessor for capturing PCM data
+        const source = audioContext.createMediaStreamSource(mediaStream);
         scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+        voiceSilenceGain = audioContext.createGain();
+        voiceSilenceGain.gain.value = 0;
         source.connect(scriptProcessor);
-        scriptProcessor.connect(audioContext.destination);
+        scriptProcessor.connect(voiceSilenceGain);
+        voiceSilenceGain.connect(audioContext.destination);
 
         scriptProcessor.onaudioprocess = (e) => {
             if (!isVoiceActive || !ws || ws.readyState !== WebSocket.OPEN) return;
             const float32 = e.inputBuffer.getChannelData(0);
-            
-            // Simple downsampling
+
             const ratio = nativeSampleRate / targetSampleRate;
             const outLength = Math.round(float32.length / ratio);
             const int16 = new Int16Array(outLength);
-            
+
             for (let i = 0; i < outLength; i++) {
                 const inIdx = Math.floor(i * ratio);
                 const s = float32[inIdx] || 0;
@@ -731,51 +1296,57 @@ async function startVoice() {
             ws.send(int16.buffer);
         };
 
-        // Set up playback
-        playbackContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-        nextPlayTime = 0;
-
-        // Tell server to start voice session
         ws.send(JSON.stringify({ type: 'voice_start' }));
         isVoiceActive = true;
         micBtn.classList.add('active');
-
     } catch (err) {
         console.error('Failed to start voice:', err);
+        stopVoice();
         addMessage('klyra', `⚠️ Could not access microphone: ${err.message}`);
     }
 }
 
 function stopVoice() {
+    const wasActive = isVoiceActive;
     isVoiceActive = false;
-    micBtn.classList.remove('active');
+    voiceResponseEnabled = false;
+    if (micBtn) micBtn.classList.remove('active');
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (wasActive && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'voice_stop' }));
     }
 
     if (scriptProcessor) {
-        scriptProcessor.disconnect();
+        scriptProcessor.onaudioprocess = null;
+        try { scriptProcessor.disconnect(); } catch (_) {}
         scriptProcessor = null;
     }
+    if (voiceSilenceGain) {
+        try { voiceSilenceGain.disconnect(); } catch (_) {}
+        voiceSilenceGain = null;
+    }
     if (audioContext) {
-        audioContext.close();
+        try { audioContext.close(); } catch (_) {}
         audioContext = null;
     }
     if (mediaStream) {
-        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream.getTracks().forEach((t) => t.stop());
         mediaStream = null;
     }
     if (playbackContext) {
-        playbackContext.close();
+        try { playbackContext.close(); } catch (_) {}
         playbackContext = null;
     }
+    nextPlayTime = 0;
 }
 
 async function playAudioChunk(blob) {
     if (!playbackContext) return;
 
     try {
+        if (playbackContext.state === 'suspended') {
+            await playbackContext.resume();
+        }
         const arrayBuffer = await blob.arrayBuffer();
         const int16 = new Int16Array(arrayBuffer);
         const float32 = new Float32Array(int16.length);
@@ -953,29 +1524,14 @@ if (newSessionBtn) {
 }
 
 function clearChat() {
-    // Clear backend chat history and local session ID (per-user)
-    localStorage.removeItem(sessionStorageKey());
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'clear_chat' }));
-        ws.close(); // Force reconnect to get a fresh session
+    if (typeof clearPendingChatAttachments === 'function') {
+        clearPendingChatAttachments();
     }
-
-    // Clear frontend messages
-    const messageNodes = Array.from(messages.childNodes);
-    messageNodes.forEach(node => {
-        if (node.id !== 'welcomeScreen') {
-            node.remove();
-        }
-    });
-
-    // Show welcome screen again
-    if (welcomeScreen) {
-        welcomeScreen.style.display = 'flex';
+    const freshSid = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    switchSession(freshSid);
+    if (chatInput) {
+        chatInput.focus();
     }
-
-    // Reset state
-    currentKlyraMessageEl = null;
-    currentKlyraText = '';
 }
 
 // ── UI Events ─────────────────────────────────────────────────────
@@ -1158,6 +1714,10 @@ async function fetchSubjects() {
         if (resp.ok) {
             const data = await resp.json();
             const subjects = data.subjects || [];
+            accessibleSubjects = subjects;
+            if (currentUser) {
+                renderAssignedCoursesUI(currentUser, accessibleSubjects);
+            }
 
             const uploadSelect = document.getElementById('uploadSubject');
             const deleteSelect = document.getElementById('deleteSubject');
@@ -1196,14 +1756,27 @@ function renderSessions(sessions) {
     const pinnedSessions = sessions.filter(s => s.pinned);
     const unpinnedSessions = sessions.filter(s => !s.pinned);
 
-    const renderSessionList = (list, title, isTop) => {
+    const renderSessionList = (list, title, storageKey) => {
         if (list.length === 0) return;
-        
-        const header = document.createElement('div');
-        header.className = 'sidebar-header';
-        header.style.marginTop = isTop ? '0' : '16px';
-        header.innerHTML = `<h3>${title}</h3>`;
-        chatSessionsList.appendChild(header);
+
+        const details = document.createElement('details');
+        details.className = 'sidebar-section sidebar-sessions-group';
+        bindSidebarSectionPersistence(details, storageKey, true);
+
+        const summary = document.createElement('summary');
+        summary.className = 'sidebar-section-summary';
+        const titleSpan = document.createElement('span');
+        titleSpan.className = 'sidebar-section-title';
+        titleSpan.textContent = title;
+        const countSpan = document.createElement('span');
+        countSpan.className = 'sidebar-section-count';
+        countSpan.textContent = String(list.length);
+        summary.appendChild(titleSpan);
+        summary.appendChild(countSpan);
+        details.appendChild(summary);
+
+        const sectionBody = document.createElement('div');
+        sectionBody.className = 'sidebar-section-body';
 
         list.forEach(session => {
             const item = document.createElement('div');
@@ -1360,12 +1933,15 @@ function renderSessions(sessions) {
             });
         });
 
-        chatSessionsList.appendChild(item);
+        sectionBody.appendChild(item);
     });
+
+        details.appendChild(sectionBody);
+        chatSessionsList.appendChild(details);
     };
 
-    renderSessionList(pinnedSessions, "Pinned Chats", true);
-    renderSessionList(unpinnedSessions, "Recent Chats", pinnedSessions.length === 0);
+    renderSessionList(pinnedSessions, "Pinned Chats", "klyra_sidebar_pinned");
+    renderSessionList(unpinnedSessions, "Recent Chats", "klyra_sidebar_recent");
 }
 
 async function pollTaskProgress(taskId, toolName, counter) {
@@ -1398,6 +1974,397 @@ async function pollTaskProgress(taskId, toolName, counter) {
             console.error("Failed to poll task:", err);
         }
     }, 1000);
+}
+
+// ── Full-Page Artifacts Workspace View ───────────────────────────
+let artifactsAll = [];
+let artifactsSubjectsList = [];
+let artifactsChatsList = [];
+let artifactsActiveSource = '';
+let artifactsActiveType = '';
+
+function formatArtifactTimestamp(isoStr) {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    if (Number.isNaN(d.getTime())) return isoStr;
+    return d.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+function getArtifactBadgeLabel(fileType) {
+    const clean = (fileType || '').replace(/^\./, '').toUpperCase();
+    return clean ? clean.slice(0, 5) : 'FILE';
+}
+
+function populateArtifactsFilterDropdowns() {
+    if (artifactsSubjectFilter) {
+        const prev = artifactsSubjectFilter.value;
+        const hasGeneral = artifactsAll.some((a) => !a.subject);
+        artifactsSubjectFilter.innerHTML = '<option value="">All Subjects</option>';
+        if (hasGeneral) {
+            const opt = document.createElement('option');
+            opt.value = '__general__';
+            opt.textContent = 'General (No Subject)';
+            artifactsSubjectFilter.appendChild(opt);
+        }
+        artifactsSubjectsList.forEach((subj) => {
+            const opt = document.createElement('option');
+            opt.value = subj;
+            opt.textContent = subj;
+            artifactsSubjectFilter.appendChild(opt);
+        });
+        if ([...artifactsSubjectFilter.options].some((o) => o.value === prev)) {
+            artifactsSubjectFilter.value = prev;
+        }
+    }
+}
+
+function getFilteredArtifacts() {
+    const query = (artifactsSearchInput ? artifactsSearchInput.value : '').trim().toLowerCase();
+    const subjectVal = artifactsSubjectFilter ? artifactsSubjectFilter.value : '';
+    const sourceVal = artifactsActiveSource;
+    const timePreset = artifactsTimePreset ? artifactsTimePreset.value : '';
+
+    let fromMs = null;
+    let toMs = null;
+    const nowMs = Date.now();
+    if (timePreset === '24h') {
+        fromMs = nowMs - 24 * 60 * 60 * 1000;
+    } else if (timePreset === '7d') {
+        fromMs = nowMs - 7 * 24 * 60 * 60 * 1000;
+    } else if (timePreset === '30d') {
+        fromMs = nowMs - 30 * 24 * 60 * 60 * 1000;
+    } else if (timePreset === 'custom') {
+        if (artifactsDateFrom && artifactsDateFrom.value) {
+            const parsed = Date.parse(artifactsDateFrom.value);
+            if (!Number.isNaN(parsed)) fromMs = parsed;
+        }
+        if (artifactsDateTo && artifactsDateTo.value) {
+            const parsed = Date.parse(artifactsDateTo.value);
+            if (!Number.isNaN(parsed)) toMs = parsed;
+        }
+    }
+
+    return artifactsAll.filter((item) => {
+        if (sourceVal && item.source !== sourceVal) return false;
+        if (artifactsActiveType === 'image' && !item.is_image) return false;
+        if (artifactsActiveType === 'file' && item.is_image) return false;
+        if (subjectVal === '__general__') {
+            if (item.subject) return false;
+        } else if (subjectVal && item.subject !== subjectVal) {
+            return false;
+        }
+        if (fromMs !== null || toMs !== null) {
+            const tsMs = item.timestamp ? Date.parse(item.timestamp) : NaN;
+            if (Number.isNaN(tsMs)) return false;
+            if (fromMs !== null && tsMs < fromMs) return false;
+            if (toMs !== null && tsMs > toMs) return false;
+        }
+        if (query) {
+            const hay = `${item.name || ''} ${item.rel_path || ''} ${item.subject || ''} ${item.session_title || ''} ${item.source || ''}`.toLowerCase();
+            if (!hay.includes(query)) return false;
+        }
+        return true;
+    });
+}
+
+function buildArtifactRow(item) {
+    const row = document.createElement('div');
+    row.className = 'artifact-row';
+
+    const sourceClass = item.source === 'uploaded' ? 'uploaded' : 'generated';
+    const sourceLabel = item.source === 'uploaded' ? 'Uploaded' : 'Generated';
+    const previewHref = item.preview_url || '';
+    const downloadHref = item.download_url || item.url || '#';
+    const tsLabel = formatArtifactTimestamp(item.timestamp);
+    const sizeLabel = formatBytesShort(item.size);
+    const subjectText = item.subject || 'General';
+
+    const iconEl = document.createElement('div');
+    iconEl.className = 'artifact-row-icon';
+    if (item.is_image && item.url) {
+        const img = document.createElement('img');
+        img.src = item.url;
+        img.alt = item.name || 'artifact';
+        img.loading = 'lazy';
+        img.title = 'Click to enlarge';
+        img.addEventListener('click', () => {
+            if (typeof openImageLightbox === 'function') {
+                openImageLightbox(item.url, item.name || 'artifact');
+            } else if (previewHref) {
+                window.open(previewHref, '_blank', 'noopener');
+            }
+        });
+        iconEl.appendChild(img);
+    } else {
+        const badge = document.createElement('span');
+        badge.className = 'artifact-row-badge';
+        badge.textContent = getArtifactBadgeLabel(item.file_type);
+        iconEl.appendChild(badge);
+    }
+
+    const mainEl = document.createElement('div');
+    mainEl.className = 'artifact-row-main';
+
+    const topRow = document.createElement('div');
+    topRow.className = 'artifact-row-top';
+    const nameLink = document.createElement('a');
+    nameLink.className = 'artifact-row-name';
+    nameLink.textContent = item.name || 'Unnamed';
+    nameLink.title = item.name || 'Unnamed';
+    if (item.is_image && item.url) {
+        nameLink.href = item.url;
+        nameLink.addEventListener('click', (e) => {
+            if (typeof openImageLightbox === 'function') {
+                e.preventDefault();
+                openImageLightbox(item.url, item.name || 'artifact');
+            }
+        });
+    } else if (previewHref) {
+        nameLink.href = previewHref;
+        nameLink.target = '_blank';
+        nameLink.rel = 'noopener';
+    } else {
+        nameLink.href = downloadHref;
+        nameLink.download = item.name || '';
+    }
+    const sourceTag = document.createElement('span');
+    sourceTag.className = `artifact-source-tag ${sourceClass}`;
+    sourceTag.textContent = sourceLabel;
+    topRow.appendChild(nameLink);
+    topRow.appendChild(sourceTag);
+
+    const metaRow = document.createElement('div');
+    metaRow.className = 'artifact-row-meta';
+    const subjChip = document.createElement('span');
+    subjChip.className = 'artifact-meta-chip subject-chip';
+    subjChip.textContent = subjectText;
+    metaRow.appendChild(subjChip);
+
+    if (item.session_id) {
+        const chatBtn = document.createElement('button');
+        chatBtn.type = 'button';
+        chatBtn.className = 'artifact-meta-chip chat-chip';
+        const chatTitle = item.session_title || 'Open Chat';
+        chatBtn.textContent = chatTitle.length > 36 ? `${chatTitle.slice(0, 36)}…` : chatTitle;
+        chatBtn.title = `Open chat: ${chatTitle}`;
+        chatBtn.addEventListener('click', () => {
+            hideArtifactsView();
+            if (item.session_id !== getSessionId()) {
+                switchSession(item.session_id);
+            }
+        });
+        metaRow.appendChild(chatBtn);
+    }
+
+    const subText = [tsLabel, sizeLabel].filter(Boolean).join(' · ');
+    if (subText) {
+        const subEl = document.createElement('span');
+        subEl.className = 'artifact-row-sub';
+        subEl.textContent = subText;
+        metaRow.appendChild(subEl);
+    }
+
+    mainEl.appendChild(topRow);
+    mainEl.appendChild(metaRow);
+
+    const actionsEl = document.createElement('div');
+    actionsEl.className = 'artifact-row-actions';
+    if (previewHref) {
+        const previewLink = document.createElement('a');
+        previewLink.href = previewHref;
+        previewLink.target = '_blank';
+        previewLink.rel = 'noopener';
+        previewLink.className = 'artifact-row-icon-btn';
+        previewLink.title = 'Preview';
+        previewLink.setAttribute('aria-label', `Preview ${item.name || 'artifact'}`);
+        previewLink.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+        actionsEl.appendChild(previewLink);
+    }
+    const dlLink = document.createElement('a');
+    dlLink.href = downloadHref;
+    dlLink.download = item.name || '';
+    dlLink.className = 'artifact-row-icon-btn';
+    dlLink.title = 'Download';
+    dlLink.setAttribute('aria-label', `Download ${item.name || 'artifact'}`);
+    dlLink.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+    actionsEl.appendChild(dlLink);
+
+    row.appendChild(iconEl);
+    row.appendChild(mainEl);
+    row.appendChild(actionsEl);
+    return row;
+}
+
+function renderArtifactsView() {
+    if (!artifactsListContainer) return;
+    const filtered = getFilteredArtifacts();
+    if (artifactsCountBadge) {
+        artifactsCountBadge.textContent = filtered.length === artifactsAll.length
+            ? `${artifactsAll.length}`
+            : `${filtered.length} / ${artifactsAll.length}`;
+    }
+
+    artifactsListContainer.innerHTML = '';
+    if (filtered.length === 0) {
+        artifactsListContainer.innerHTML = '<div class="artifacts-empty">No artifacts match the current filters.</div>';
+        return;
+    }
+
+    const groupMode = artifactsGroupBy ? artifactsGroupBy.value : 'all';
+    if (groupMode === 'all') {
+        const list = document.createElement('div');
+        list.className = 'artifacts-list';
+        filtered.forEach((item) => list.appendChild(buildArtifactRow(item)));
+        artifactsListContainer.appendChild(list);
+        return;
+    }
+
+    const groups = new Map();
+    filtered.forEach((item) => {
+        const key = groupMode === 'subject'
+            ? (item.subject || 'General (No Subject)')
+            : (item.session_id ? `${item.session_title || 'Untitled Chat'}||${item.session_id}` : 'Unlinked / Direct Files||');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+    });
+
+    for (const [groupKey, items] of groups.entries()) {
+        const section = document.createElement('details');
+        section.className = 'artifacts-group';
+        section.open = true;
+
+        const summary = document.createElement('summary');
+        summary.className = 'artifacts-group-summary';
+        const displayLabel = groupMode === 'chat' ? groupKey.split('||')[0] : groupKey;
+        summary.innerHTML = `
+            <span class="artifacts-group-left">
+                <span class="artifacts-group-toggle" title="Collapse / expand group" aria-hidden="true">
+                    <svg class="artifacts-group-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                </span>
+                <span class="artifacts-group-title">${escapeHtml(displayLabel)}</span>
+            </span>
+            <span class="artifacts-group-count">${items.length}</span>
+        `;
+        section.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.className = 'artifacts-list';
+        items.forEach((item) => list.appendChild(buildArtifactRow(item)));
+        section.appendChild(list);
+        artifactsListContainer.appendChild(section);
+    }
+}
+
+async function fetchArtifacts() {
+    if (!artifactsListContainer) return;
+    artifactsListContainer.innerHTML = '<div class="artifacts-empty">Loading artifacts...</div>';
+    try {
+        const resp = await fetch('/api/artifacts');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        artifactsAll = Array.isArray(data.artifacts) ? data.artifacts : [];
+        artifactsSubjectsList = Array.isArray(data.subjects) ? data.subjects : [];
+        artifactsChatsList = Array.isArray(data.chats) ? data.chats : [];
+        populateArtifactsFilterDropdowns();
+        renderArtifactsView();
+    } catch (err) {
+        artifactsListContainer.innerHTML = `<div class="artifacts-empty">Failed to load artifacts: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function showArtifactsView() {
+    if (isVoiceActive) {
+        stopVoice();
+    }
+    if (!artifactsView) return;
+    if (chatScrollArea) chatScrollArea.hidden = true;
+    if (inputBar) inputBar.hidden = true;
+    artifactsView.hidden = false;
+    if (sidebarArtifactsBtn) sidebarArtifactsBtn.classList.add('active');
+    fetchArtifacts();
+}
+
+function hideArtifactsView() {
+    if (!artifactsView) return;
+    artifactsView.hidden = true;
+    if (chatScrollArea) chatScrollArea.hidden = false;
+    if (inputBar) inputBar.hidden = false;
+    if (sidebarArtifactsBtn) sidebarArtifactsBtn.classList.remove('active');
+}
+
+if (sidebarArtifactsBtn) {
+    sidebarArtifactsBtn.addEventListener('click', () => {
+        if (artifactsView && !artifactsView.hidden) {
+            hideArtifactsView();
+        } else {
+            showArtifactsView();
+        }
+    });
+}
+if (backToChatBtn) {
+    backToChatBtn.addEventListener('click', hideArtifactsView);
+}
+if (artifactsRefreshBtn) {
+    artifactsRefreshBtn.addEventListener('click', fetchArtifacts);
+}
+if (artifactsSearchInput) {
+    artifactsSearchInput.addEventListener('input', renderArtifactsView);
+}
+if (artifactsSubjectFilter) {
+    artifactsSubjectFilter.addEventListener('change', renderArtifactsView);
+}
+if (artifactsGroupBy) {
+    artifactsGroupBy.addEventListener('change', renderArtifactsView);
+}
+if (artifactsTimePreset) {
+    artifactsTimePreset.addEventListener('change', () => {
+        if (artifactsCustomRange) {
+            artifactsCustomRange.hidden = artifactsTimePreset.value !== 'custom';
+        }
+        renderArtifactsView();
+    });
+}
+if (artifactsDateFrom) {
+    artifactsDateFrom.addEventListener('change', renderArtifactsView);
+}
+if (artifactsDateTo) {
+    artifactsDateTo.addEventListener('change', renderArtifactsView);
+}
+document.querySelectorAll('.artifacts-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        artifactsActiveSource = btn.dataset.source || '';
+        document.querySelectorAll('.artifacts-pill').forEach((b) => b.classList.toggle('active', b === btn));
+        renderArtifactsView();
+    });
+});
+document.querySelectorAll('.artifacts-type-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        artifactsActiveType = btn.dataset.type || '';
+        document.querySelectorAll('.artifacts-type-pill').forEach((b) => b.classList.toggle('active', b === btn));
+        renderArtifactsView();
+    });
+});
+if (artifactsResetFiltersBtn) {
+    artifactsResetFiltersBtn.addEventListener('click', () => {
+        if (artifactsSearchInput) artifactsSearchInput.value = '';
+        if (artifactsSubjectFilter) artifactsSubjectFilter.value = '';
+        if (artifactsTimePreset) artifactsTimePreset.value = '';
+        if (artifactsGroupBy) artifactsGroupBy.value = 'all';
+        if (artifactsDateFrom) artifactsDateFrom.value = '';
+        if (artifactsDateTo) artifactsDateTo.value = '';
+        if (artifactsCustomRange) artifactsCustomRange.hidden = true;
+        artifactsActiveSource = '';
+        artifactsActiveType = '';
+        document.querySelectorAll('.artifacts-pill').forEach((b) => b.classList.toggle('active', (b.dataset.source || '') === ''));
+        document.querySelectorAll('.artifacts-type-pill').forEach((b) => b.classList.toggle('active', (b.dataset.type || '') === ''));
+        renderArtifactsView();
+    });
 }
 
 // ── Initialize ────────────────────────────────────────────────────

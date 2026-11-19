@@ -25,6 +25,13 @@ create_qp_task:
     - If source_filter is not "any", call list_source_files first to resolve it
       to a matching source_file, then pass source_file= to search_syllabus /
       search_pyq / fetch_pyq_chunks.
+    - UPLOADED ARTIFACT SYLLABUS ALIGNMENT: Whenever the requester's `notes`
+      reference an uploaded image/file artifact or ask to prepare questions
+      based on uploaded material, you MUST call `search_syllabus` to verify
+      every concept, formula, and topic against the indexed syllabus of
+      "{subject}". Strictly align every generated question with the indexed
+      syllabus and course notation of "{subject}" — drop or reframe any
+      concepts from the uploaded artifact that fall outside the indexed syllabus.
 
     If concepts is "any": derive from syllabus/week files when available, else
     from the PYQ bank and subject domain rules.

@@ -52,18 +52,24 @@ class VoiceOrchestrator:
     voice_name : str | None
         Prebuilt voice name.  Falls back to ``KLYRA_VOICE_NAME`` env var,
         then to ``"Puck"``.
+    voice_response : bool
+        When ``True`` (CLI ``--voice-response``), play Klyra's spoken audio
+        responses through ``transport.write_chunk``.  When ``False`` (default),
+        display text responses only without audio playback.
     """
 
     def __init__(
         self,
         transport,  # AudioTransport — import-free for type hint
         voice_name: str | None = None,
+        voice_response: bool = False,
     ) -> None:
         self._transport = transport
         self._voice_name = (
             voice_name
             or os.environ.get("KLYRA_VOICE_NAME", _DEFAULT_VOICE)
         )
+        self._voice_response = bool(voice_response)
         self._model = os.environ.get("KLYRA_VOICE_MODEL", _DEFAULT_MODEL)
 
         # Resolved lazily in run() to avoid top-level heavy imports
@@ -135,7 +141,11 @@ class VoiceOrchestrator:
         # Start audio transport
         await self._transport.start()
 
-        print(f"\n  🎙  Klyra voice ready.  (model={self._model}, voice={self._voice_name})")
+        mode_label = "voice-response" if self._voice_response else "text-only"
+        print(
+            f"\n  🎙  Klyra voice ready.  "
+            f"(mode={mode_label}, model={self._model}, voice={self._voice_name})"
+        )
         print("  Speak naturally. Press Ctrl+C to exit.\n")
 
         attempt = 0
@@ -149,6 +159,8 @@ class VoiceOrchestrator:
 
                 config = types.LiveConnectConfig(
                     response_modalities=["AUDIO"],
+                    input_audio_transcription=types.AudioTranscriptionConfig(),
+                    output_audio_transcription=types.AudioTranscriptionConfig(),
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -372,12 +384,24 @@ class VoiceOrchestrator:
                             print(f"{response.server_content.output_transcription.text}", end="", flush=True)
                             self._current_model_response += response.server_content.output_transcription.text
 
-                        # Handle agent response (text and audio)
+                        # Handle agent response (spoken audio when --voice-response is enabled)
                         if response.server_content.model_turn is not None:
+                            has_output_transcript = bool(
+                                response.server_content.output_transcription
+                                and response.server_content.output_transcription.text
+                            )
                             for part in response.server_content.model_turn.parts:
-                                if part.inline_data and part.inline_data.data:
+                                if (
+                                    self._voice_response
+                                    and getattr(part, "inline_data", None) is not None
+                                    and getattr(part.inline_data, "data", None)
+                                ):
                                     await self._transport.write_chunk(part.inline_data.data)
-                                if part.text:
+                                if (
+                                    not has_output_transcript
+                                    and part.text
+                                    and not getattr(part, "thought", False)
+                                ):
                                     if not agent_speaking:
                                         print("\r  🤖  Klyra: \033[36m", end="", flush=True)
                                         agent_speaking = True

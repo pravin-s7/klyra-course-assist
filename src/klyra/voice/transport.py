@@ -99,7 +99,8 @@ class PyAudioTransport(AudioTransport):
     don't block the asyncio event loop.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, enable_output: bool = True) -> None:
+        self._enable_output = enable_output
         self._pa = None
         self._mic_stream = None
         self._spk_stream = None
@@ -136,10 +137,11 @@ class PyAudioTransport(AudioTransport):
             if dev.get("maxOutputChannels", 0) > 0:
                 has_output = True
 
-        if not has_input or not has_output:
+        need_output = self._enable_output
+        if not has_input or (need_output and not has_output):
             self._pa.terminate()
             msg = "No audio "
-            if not has_input and not has_output:
+            if not has_input and need_output and not has_output:
                 msg += "input or output devices"
             elif not has_input:
                 msg += "input device (microphone)"
@@ -179,31 +181,33 @@ class PyAudioTransport(AudioTransport):
                 frames_per_buffer=frames,
             )
 
-        try:
-            self._spk_stream = self._pa.open(
-                format=_pa_mod.paInt16,
-                channels=CHANNELS,
-                rate=OUTPUT_SAMPLE_RATE,
-                output=True,
-                frames_per_buffer=OUTPUT_CHUNK_FRAMES,
-            )
-            self._spk_actual_rate = OUTPUT_SAMPLE_RATE
-        except Exception as e:
-            logger.warning("Failed to open spk at %dHz, trying %dHz. Error: %s", OUTPUT_SAMPLE_RATE, fallback_rate, e)
-            self._spk_actual_rate = fallback_rate
-            frames = int(OUTPUT_CHUNK_FRAMES * fallback_rate / OUTPUT_SAMPLE_RATE)
-            self._spk_stream = self._pa.open(
-                format=_pa_mod.paInt16,
-                channels=CHANNELS,
-                rate=fallback_rate,
-                output=True,
-                frames_per_buffer=frames,
-            )
+        if self._enable_output:
+            try:
+                self._spk_stream = self._pa.open(
+                    format=_pa_mod.paInt16,
+                    channels=CHANNELS,
+                    rate=OUTPUT_SAMPLE_RATE,
+                    output=True,
+                    frames_per_buffer=OUTPUT_CHUNK_FRAMES,
+                )
+                self._spk_actual_rate = OUTPUT_SAMPLE_RATE
+            except Exception as e:
+                logger.warning("Failed to open spk at %dHz, trying %dHz. Error: %s", OUTPUT_SAMPLE_RATE, fallback_rate, e)
+                self._spk_actual_rate = fallback_rate
+                frames = int(OUTPUT_CHUNK_FRAMES * fallback_rate / OUTPUT_SAMPLE_RATE)
+                self._spk_stream = self._pa.open(
+                    format=_pa_mod.paInt16,
+                    channels=CHANNELS,
+                    rate=fallback_rate,
+                    output=True,
+                    frames_per_buffer=frames,
+                )
 
         logger.info(
-            "Audio transport started  mic=%dHz (actual %dHz)  spk=%dHz (actual %dHz)",
-            INPUT_SAMPLE_RATE, self._mic_actual_rate,
-            OUTPUT_SAMPLE_RATE, self._spk_actual_rate,
+            "Audio transport started  mic=%dHz (actual %dHz)  spk=%s",
+            INPUT_SAMPLE_RATE,
+            self._mic_actual_rate,
+            f"{OUTPUT_SAMPLE_RATE}Hz (actual {self._spk_actual_rate}Hz)" if self._enable_output else "disabled",
         )
 
     async def read_chunk(self) -> bytes:
@@ -229,6 +233,8 @@ class PyAudioTransport(AudioTransport):
 
     async def write_chunk(self, data: bytes) -> None:
         """Write one chunk to the speaker (runs in executor)."""
+        if not self._enable_output or self._spk_stream is None:
+            return
         if self._spk_actual_rate != OUTPUT_SAMPLE_RATE:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

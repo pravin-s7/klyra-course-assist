@@ -115,18 +115,27 @@ def health() -> HealthResponse:
     return HealthResponse()
 
 
+_NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
+
 @app.get("/")
 async def index():
     """Serve the main chat UI."""
     html_path = _STATIC_DIR / "index.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        html_path.read_text(encoding="utf-8"),
+        headers=_NO_CACHE_HEADERS,
+    )
 
 
 @app.get("/admin")
 async def admin_page():
     """Serve the user-management admin panel (API itself enforces admin)."""
     html_path = _STATIC_DIR / "admin.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        html_path.read_text(encoding="utf-8"),
+        headers=_NO_CACHE_HEADERS,
+    )
 
 
 @app.get("/static/{filename}")
@@ -146,4 +155,8 @@ async def static_file(filename: str):
         ".ico": "image/x-icon",
     }
     ct = content_types.get(file_path.suffix, "application/octet-stream")
-    return Response(content=file_path.read_bytes(), media_type=ct)
+    return Response(
+        content=file_path.read_bytes(),
+        media_type=ct,
+        headers=_NO_CACHE_HEADERS,
+    )

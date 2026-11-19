@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
@@ -58,6 +59,7 @@ class ChatOrchestrator:
         self._chat = None
         self._executor = None
         self._history: list[dict] = []
+        self._has_uploaded_attachments: bool = False
 
     async def initialize(self):
         """Set up the Gemini client and chat session."""
@@ -80,103 +82,390 @@ class ChatOrchestrator:
 
         decls = get_all_declarations()
         func_decls = [types.FunctionDeclaration(**d) for d in decls]
+        from klyra.chat.guardrails import build_subject_guardrail_instruction
+
+        sys_inst = SYSTEM_INSTRUCTION + build_subject_guardrail_instruction(self._allowed_subjects)
 
         self._config = types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
+            system_instruction=sys_inst,
             tools=[types.Tool(function_declarations=func_decls)],
             temperature=0.7,
         )
 
-    async def send_message(self, user_text: str) -> str:
-        """Send a user message and get Klyra's full response.
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        err_str = str(exc).upper()
+        return any(
+            token in err_str
+            for token in (
+                "503",
+                "UNAVAILABLE",
+                "429",
+                "RESOURCE_EXHAUSTED",
+                "500",
+                "502",
+                "504",
+                "DEADLINE_EXCEEDED",
+                "OVERLOADED",
+            )
+        )
 
-        Handles tool calls automatically in a loop until Gemini returns
-        a text response.  Callbacks (on_text, on_tool_start, etc.) are
-        invoked along the way.
+    async def _generate_with_retry(self):
+        """Call `generate_content` with automatic backoff on transient 503/429 errors."""
+        delays = (2.0, 4.0)
+        last_exc = None
+        for attempt in range(len(delays) + 1):
+            try:
+                return await self._client.aio.models.generate_content(
+                    model=self._model,
+                    contents=self._history,
+                    config=self._config,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_transient_error(exc) or attempt >= len(delays):
+                    raise
+                wait_s = delays[attempt]
+                logger.warning(
+                    "Transient Gemini error (%s), retrying in %.1fs (attempt %d/%d)...",
+                    exc,
+                    wait_s,
+                    attempt + 1,
+                    len(delays),
+                )
+                await asyncio.sleep(wait_s)
+        if last_exc is not None:  # pragma: no cover
+            raise last_exc
+        raise RuntimeError("Gemini generation failed after retries.")  # pragma: no cover
 
-        Returns the full accumulated text response.
+    async def _generate_stream_round(self):
+        """Stream one Gemini response round, emitting text chunks incrementally.
+
+        Returns ``(assembled_content, function_calls, streamed_text)``.
+        Falls back to `_generate_with_retry()` if the client lacks `generate_content_stream`.
         """
         from google.genai import types
 
-        self._history.append(
-            types.Content(role="user", parts=[types.Part(text=user_text)])
+        models_api = getattr(getattr(self._client, "aio", None), "models", None)
+        stream_fn = getattr(models_api, "generate_content_stream", None)
+        if not callable(stream_fn):
+            response = await self._generate_with_retry()
+            if not response.candidates:
+                return None, [], ""
+            cand = response.candidates[0]
+            parts = list(cand.content.parts) if (cand.content and cand.content.parts) else []
+            fcs = [p for p in parts if getattr(p, "function_call", None)]
+            text_acc = ""
+            if not fcs:
+                for p in parts:
+                    if getattr(p, "text", None) and not getattr(p, "thought", False):
+                        text_acc += p.text
+                        if self._on_text:
+                            await _maybe_await(self._on_text(p.text))
+            return cand.content, fcs, text_acc
+
+        delays = (2.0, 4.0)
+        last_exc: Exception | None = None
+        for attempt in range(len(delays) + 1):
+            emitted_any = False
+            text_acc = ""
+            raw_parts: list = []
+            function_calls: list = []
+            try:
+                stream = await stream_fn(
+                    model=self._model,
+                    contents=self._history,
+                    config=self._config,
+                )
+                async for chunk in stream:
+                    if not getattr(chunk, "candidates", None):
+                        continue
+                    cand = chunk.candidates[0]
+                    content = getattr(cand, "content", None)
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        if getattr(part, "thought", False):
+                            continue
+                        if getattr(part, "function_call", None):
+                            function_calls.append(part)
+                            raw_parts.append(part)
+                        elif getattr(part, "text", None):
+                            delta = part.text
+                            text_acc += delta
+                            emitted_any = True
+                            if self._on_text:
+                                await _maybe_await(self._on_text(delta))
+                assembled_parts: list = []
+                if text_acc:
+                    assembled_parts.append(types.Part(text=text_acc))
+                assembled_parts.extend(raw_parts)
+                assembled_content = (
+                    types.Content(role="model", parts=assembled_parts)
+                    if assembled_parts
+                    else None
+                )
+                return assembled_content, function_calls, text_acc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if emitted_any or not self._is_transient_error(exc) or attempt >= len(delays):
+                    raise
+                wait_s = delays[attempt]
+                logger.warning(
+                    "Transient Gemini stream error (%s), retrying in %.1fs (attempt %d/%d)...",
+                    exc,
+                    wait_s,
+                    attempt + 1,
+                    len(delays),
+                )
+                await asyncio.sleep(wait_s)
+        if last_exc is not None:  # pragma: no cover
+            raise last_exc
+        raise RuntimeError("Gemini streaming failed after retries.")  # pragma: no cover
+
+    @staticmethod
+    def _extract_docx_text(fp: Path, max_chars: int = 60000) -> str:
+        """Extract plain text paragraphs from a .docx file using stdlib zipfile + XML."""
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        with zipfile.ZipFile(fp) as zf:
+            xml_bytes = zf.read("word/document.xml")
+        root = ET.fromstring(xml_bytes)
+        paragraphs: list[str] = []
+        for p in root.iter():
+            if p.tag.endswith("}p"):
+                runs = [t.text for t in p.iter() if t.tag.endswith("}t") and t.text]
+                if runs:
+                    paragraphs.append("".join(runs))
+        return "\n".join(paragraphs)[:max_chars]
+
+    async def send_message(
+        self,
+        user_text: str,
+        attachments: list[dict] | None = None,
+    ) -> str:
+        """Send a user message (with optional image/file attachments) and stream Klyra's response.
+
+        Enforces assigned-subject guardrails (deterministic pre-check + LLM verification)
+        before calling Gemini, streams text deltas via ``on_text``, and handles tool calls
+        automatically in a loop until Gemini finishes.
+        """
+        from google.genai import types
+        from klyra.chat.guardrails import (
+            check_prompt_subject_scope,
+            verify_request_against_indexed_syllabus,
         )
+
+        # 1. Fast pre-check (empty assigned subjects or explicit unassigned docs/ folder)
+        allowed, refusal = check_prompt_subject_scope(
+            user_text,
+            self._allowed_subjects,
+            has_attachments=bool(attachments),
+        )
+        if not allowed:
+            self._history.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
+            self._history.append(types.Content(role="model", parts=[types.Part(text=refusal)]))
+            if self._on_text:
+                await _maybe_await(self._on_text(refusal))
+            return refusal
+
+        # 2. Load attached artifacts (images, PDFs, DOCX, text/code) before syllabus verification
+        #    so the verifier inspects both the prompt AND the actual artifact content.
+        user_parts: list = []
+        att_notes: list[str] = []
+        binary_image_mimes = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+        text_exts = {
+            ".txt", ".md", ".tex", ".csv", ".json", ".py", ".c", ".cpp", ".h",
+            ".java", ".js", ".ts", ".sql", ".sh", ".bash", ".yaml", ".yml",
+            ".xml", ".html", ".css", ".svg", ".log", ".rtf",
+        }
+
+        if attachments:
+            for att in attachments:
+                att_path = att.get("path")
+                if not att_path:
+                    continue
+                fp = Path(att_path)
+                if not fp.exists() or not fp.is_file():
+                    continue
+                ext = fp.suffix.lower()
+                mime_type = str(att.get("mime_type") or "application/octet-stream").split(";")[0].strip().lower()
+                name = str(att.get("name") or fp.name)
+                rel_path = str(att.get("rel_path") or name)
+                try:
+                    if mime_type in binary_image_mimes:
+                        raw_bytes = fp.read_bytes()
+                        user_parts.append(
+                            types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
+                        )
+                        att_notes.append(f"[Attached image: {name} ({rel_path})]")
+                    elif ext == ".pdf" or mime_type == "application/pdf":
+                        raw_bytes = fp.read_bytes()
+                        user_parts.append(
+                            types.Part.from_bytes(data=raw_bytes, mime_type="application/pdf")
+                        )
+                        att_notes.append(f"[Attached PDF document: {name} ({rel_path})]")
+                    elif ext == ".docx":
+                        doc_text = self._extract_docx_text(fp)
+                        att_notes.append(
+                            f"[Attached DOCX document: {name} ({rel_path})]\n{doc_text}"
+                        )
+                    elif ext in text_exts or mime_type.startswith("text/") or mime_type == "application/json":
+                        file_text = fp.read_text(encoding="utf-8", errors="replace")[:60000]
+                        att_notes.append(
+                            f"[Attached file: {name} ({rel_path})]\n```\n{file_text}\n```"
+                        )
+                    else:
+                        att_notes.append(f"[Attached file: {name} ({rel_path}, {mime_type})]")
+                except Exception as exc:
+                    logger.warning("Failed to read attachment %s: %s", fp, exc)
+
+        # 3. Dynamic indexed-syllabus verification check (prompt + attached artifacts)
+        allowed_syl, refusal_syl = await verify_request_against_indexed_syllabus(
+            self._client,
+            self._model,
+            user_text,
+            self._allowed_subjects,
+            attachment_parts=user_parts or None,
+            attachment_notes=att_notes or None,
+            history_summary=self.get_history_summary(),
+        )
+        if not allowed_syl:
+            self._history.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
+            self._history.append(types.Content(role="model", parts=[types.Part(text=refusal_syl)]))
+            if self._on_text:
+                await _maybe_await(self._on_text(refusal_syl))
+            return refusal_syl
+
+        history_snapshot_len = len(self._history)
+
+        effective_text = (user_text or "").strip()
+        if not effective_text and att_notes:
+            effective_text = "Please inspect and help with the attached artifact(s)."
+        if att_notes:
+            self._has_uploaded_attachments = True
+            from klyra.chat.guardrails import fetch_indexed_syllabus_context
+
+            target_subjs: set[str] = set()
+            for att in attachments or []:
+                s = str(att.get("subject") or "").strip().lower()
+                if s and (self._allowed_subjects is None or s in self._allowed_subjects):
+                    target_subjs.add(s)
+            if not target_subjs and self._allowed_subjects:
+                target_subjs = set(self._allowed_subjects)
+
+            alignment_note = (
+                "\n\n[SYLLABUS ALIGNMENT REQUIREMENT FOR ATTACHED ARTIFACTS]: "
+                "If the user asks to prepare or generate questions, a question paper, coding problems, "
+                "or teaching material based on the attached artifact(s), you MUST align every question "
+                "strictly with the indexed syllabus of the target subject (only using concepts, scope, "
+                "and notation covered in the indexed syllabus; omit or reframe any out-of-syllabus parts). "
+                "When calling generate_question_paper or related tools, include the relevant artifact "
+                "details in `notes` and enforce strict alignment with the subject's indexed syllabus."
+            )
+            if target_subjs:
+                syl_map = fetch_indexed_syllabus_context(
+                    target_subjs,
+                    query_text=effective_text,
+                    max_concepts_per_subject=40,
+                    max_chars_per_subject=1200,
+                )
+                syl_block = "\n".join(
+                    f"[{subj}] {summary}" for subj, summary in syl_map.items() if summary
+                )
+                if syl_block:
+                    alignment_note += f"\nIndexed syllabus reference:\n{syl_block}"
+
+            effective_text = f"{effective_text}\n\n" + "\n".join(att_notes) + alignment_note
+
+        user_parts.append(types.Part(text=effective_text))
+        self._history.append(types.Content(role="user", parts=user_parts))
 
         full_response = ""
         max_tool_rounds = 10
 
-        for _ in range(max_tool_rounds):
-            response = await self._client.aio.models.generate_content(
-                model=self._model,
-                contents=self._history,
-                config=self._config,
-            )
+        try:
+            for _ in range(max_tool_rounds):
+                model_content, function_calls, streamed_text = await self._generate_stream_round()
 
-            if not response.candidates:
-                break
+                if function_calls:
+                    if model_content is not None:
+                        self._history.append(model_content)
 
-            candidate = response.candidates[0]
-            parts = candidate.content.parts if candidate.content else []
+                    func_response_parts = []
+                    for part in function_calls:
+                        fc = part.function_call
+                        tool_name = fc.name
+                        tool_args = dict(fc.args) if fc.args else {}
 
-            # Check for function calls
-            function_calls = [p for p in parts if p.function_call]
-            text_parts = [p for p in parts if p.text]
+                        if (
+                            self._has_uploaded_attachments
+                            and tool_name in {
+                                "generate_question_paper",
+                                "revise_question_paper",
+                                "generate_coding_problems",
+                                "prepare_teaching_material",
+                            }
+                        ):
+                            subj_label = str(tool_args.get("subject") or "the target subject")
+                            directive = (
+                                f"STRICT INDEXED-SYLLABUS ALIGNMENT: Any questions based on uploaded "
+                                f"artifact(s) MUST strictly align with the indexed syllabus of '{subj_label}'. "
+                                "Cross-check all topics against search_syllabus and exclude out-of-syllabus content."
+                            )
+                            existing_notes = str(tool_args.get("notes") or "").strip()
+                            if "STRICT INDEXED-SYLLABUS ALIGNMENT" not in existing_notes:
+                                tool_args["notes"] = (
+                                    f"{existing_notes}\n\n{directive}" if existing_notes else directive
+                                )
 
-            if function_calls:
-                # Add the model's function-call response to history
-                self._history.append(candidate.content)
+                        if self._on_tool_start:
+                            await _maybe_await(self._on_tool_start(tool_name, tool_args))
 
-                # Execute each function call
-                func_response_parts = []
-                for part in function_calls:
-                    fc = part.function_call
-                    tool_name = fc.name
-                    tool_args = dict(fc.args) if fc.args else {}
+                        import time as _time
+                        tool_start_time = _time.time()
+                        result = await self._executor.execute(tool_name, tool_args)
 
-                    if self._on_tool_start:
-                        await _maybe_await(self._on_tool_start(tool_name, tool_args))
+                        status = result.get("status", "error")
+                        message = result.get("message", "")
 
-                    import time as _time
-                    tool_start_time = _time.time()
-                    result = await self._executor.execute(tool_name, tool_args)
+                        if self._on_tool_done:
+                            await _maybe_await(self._on_tool_done(tool_name, status, message))
 
-                    status = result.get("status", "error")
-                    message = result.get("message", "")
+                        if status == "success" and self._on_file_link:
+                            await self._detect_files(tool_name, tool_args, message, since_time=tool_start_time)
 
-                    if self._on_tool_done:
-                        await _maybe_await(self._on_tool_done(tool_name, status, message))
-
-                    # Detect generated files and images
-                    if status == "success" and self._on_file_link:
-                        await self._detect_files(tool_name, tool_args, message, since_time=tool_start_time)
-
-                    func_response_parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                name=tool_name,
-                                response=result,
+                        func_response_parts.append(
+                            types.Part(
+                                function_response=types.FunctionResponse(
+                                    name=tool_name,
+                                    response=result,
+                                )
                             )
                         )
+
+                    self._history.append(
+                        types.Content(role="user", parts=func_response_parts)
                     )
+                    continue
 
-                # Send function responses back
-                self._history.append(
-                    types.Content(role="user", parts=func_response_parts)
-                )
-                # Loop to get Gemini's text response after tool execution
-                continue
-
-            # Text response — stream it out
-            for part in text_parts:
-                if part.text:
-                    full_response += part.text
-                    if self._on_text:
-                        await _maybe_await(self._on_text(part.text))
-
-            # Add the model's text response to history
-            if candidate.content:
-                self._history.append(candidate.content)
-            break
+                if streamed_text:
+                    full_response += streamed_text
+                if model_content is not None:
+                    self._history.append(model_content)
+                break
+        except asyncio.CancelledError:
+            if not full_response:
+                del self._history[history_snapshot_len:]
+            raise
+        except Exception:
+            if not full_response:
+                del self._history[history_snapshot_len:]
+            raise
 
         if full_response and self._on_file_link:
             await self._emit_download_cards_from_text(full_response)
@@ -421,12 +710,27 @@ class ChatOrchestrator:
         return result
 
     def to_dict(self) -> dict:
-        """Serialize the internal Gemini history to a dictionary."""
+        """Serialize the internal Gemini history to a dictionary.
+
+        Strips binary inline_data blobs so SQLite session storage stays compact;
+        filename/path references remain in the accompanying text parts.
+        """
         import json
+
         serialized = []
         for content in self._history:
-            # model_dump_json() handles Pydantic bytes -> base64 serialization
-            serialized.append(json.loads(content.model_dump_json()))
+            dumped = json.loads(content.model_dump_json())
+            parts = dumped.get("parts")
+            if isinstance(parts, list):
+                cleaned_parts = []
+                for p in parts:
+                    if isinstance(p, dict) and p.get("inline_data"):
+                        mime = (p["inline_data"] or {}).get("mime_type") or "image"
+                        cleaned_parts.append({"text": f"[Attached {mime} artifact]"})
+                    else:
+                        cleaned_parts.append(p)
+                dumped["parts"] = cleaned_parts
+            serialized.append(dumped)
         return {"history": serialized}
 
     def load_from_dict(self, data: dict):

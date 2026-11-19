@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime, timezone
 import io
+import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
 from klyra.auth.dependencies import (
@@ -37,10 +40,28 @@ _MIME_TYPES = {
     ".svg": "image/svg+xml",
     ".webp": "image/webp",
     ".pdf": "application/pdf",
-    ".md": "text/markdown; charset=utf-8",
+    ".md": "text/plain; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
     ".tex": "text/plain; charset=utf-8",
     ".py": "text/plain; charset=utf-8",
+    ".java": "text/plain; charset=utf-8",
+    ".c": "text/plain; charset=utf-8",
+    ".cpp": "text/plain; charset=utf-8",
+    ".h": "text/plain; charset=utf-8",
+    ".sh": "text/plain; charset=utf-8",
+    ".bash": "text/plain; charset=utf-8",
+    ".sed": "text/plain; charset=utf-8",
+    ".awk": "text/plain; charset=utf-8",
+    ".sql": "text/plain; charset=utf-8",
+    ".csv": "text/plain; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
+    ".js": "text/plain; charset=utf-8",
+    ".ts": "text/plain; charset=utf-8",
+    ".css": "text/plain; charset=utf-8",
+    ".html": "text/plain; charset=utf-8",
+    ".xml": "text/plain; charset=utf-8",
+    ".toml": "text/plain; charset=utf-8",
+    ".ini": "text/plain; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".yaml": "text/plain; charset=utf-8",
     ".yml": "text/plain; charset=utf-8",
@@ -285,7 +306,174 @@ async def serve_file(
             media_type="application/octet-stream",
         )
 
-    return FileResponse(path=str(file_path), media_type=media_type)
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{file_path.name}"'},
+    )
+
+
+@router.get("/preview/{path:path}")
+async def preview_file_page(
+    path: str,
+    user: UserRecord = Depends(get_current_user),
+):
+    """Render an in-browser preview page for any file in `docs/` when opened in a new tab."""
+    import html as _html
+    import json as _json
+
+    docs_base = _docs_dir().resolve()
+    file_path, rel_path = _resolve_docs_file(path, user)
+    if file_path is None or not str(file_path).startswith(str(docs_base)):
+        return HTMLResponse("<h3>403 Forbidden: Invalid file path</h3>", status_code=403)
+
+    if not can_read_generated_file(user, rel_path):
+        return HTMLResponse(
+            "<h3>403 Forbidden: You do not have permission to view this file.</h3>",
+            status_code=403,
+        )
+
+    if not file_path.is_file():
+        return HTMLResponse("<h3>404 Not Found</h3>", status_code=404)
+
+    suffix = file_path.suffix.lower()
+    is_image = suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+    is_pdf = suffix == ".pdf"
+    is_markdown = suffix == ".md"
+    file_url = f"/files/{rel_path}"
+    download_url = f"/files/{rel_path}?download=true"
+    safe_name = _html.escape(file_path.name)
+    safe_rel = _html.escape(rel_path)
+    try:
+        size_bytes = file_path.stat().st_size
+    except OSError:
+        size_bytes = 0
+
+    text_content: str | None = None
+    if not is_image and not is_pdf:
+        if suffix == ".docx":
+            try:
+                from klyra.chat import ChatOrchestrator
+
+                text_content = ChatOrchestrator._extract_docx_text(file_path, max_chars=200000)
+            except Exception:
+                text_content = None
+        else:
+            try:
+                text_content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text_content = None
+
+    if is_pdf:
+        body_html = f'<iframe src="{_html.escape(file_url)}" style="display:block;width:100%;height:calc(100vh - 52px);border:none;background:#111;"></iframe>'
+    elif is_image:
+        body_html = f"""
+        <div style="display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 70px);padding:24px;">
+            <img src="{_html.escape(file_url)}" alt="{safe_name}" style="max-width:95vw;max-height:85vh;object-fit:contain;border-radius:8px;border:1px solid var(--border);background:#fff;padding:8px;">
+        </div>
+        """
+    elif text_content is not None and is_markdown:
+        json_text = _json.dumps(text_content)
+        json_url = _json.dumps(file_url)
+        body_html = f"""
+        <div style="max-width:980px;margin:24px auto;padding:0 20px 60px;">
+            <div id="mdRendered" class="doc-preview-content markdown-rendered" style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-height:none;overflow:visible;"></div>
+            <pre id="mdRaw" style="display:none;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:12px;padding:24px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.6;">{_html.escape(text_content)}</pre>
+        </div>
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <script>
+            MathJax = {{
+                tex: {{ inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']] }}
+            }};
+        </script>
+        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+        <script src="/static/markdown.js?v=5"></script>
+        <script>
+            const rawMd = {json_text};
+            const srcUrl = {json_url};
+            const renderedEl = document.getElementById('mdRendered');
+            const rawEl = document.getElementById('mdRaw');
+            renderedEl.innerHTML = renderMarkdown(rawMd, srcUrl);
+            window.addEventListener('load', () => {{
+                if (window.MathJax && window.MathJax.typesetPromise) {{
+                    MathJax.typesetPromise([renderedEl]).catch(() => {{}});
+                }}
+            }});
+            function toggleRawMd(btn) {{
+                const showingRaw = rawEl.style.display !== 'none';
+                rawEl.style.display = showingRaw ? 'none' : 'block';
+                renderedEl.style.display = showingRaw ? 'block' : 'none';
+                btn.textContent = showingRaw ? 'View Raw' : 'View Rendered';
+            }}
+            function copyFileText(btn) {{
+                navigator.clipboard.writeText(rawMd).then(() => {{
+                    const old = btn.textContent;
+                    btn.textContent = 'Copied ✓';
+                    setTimeout(() => btn.textContent = old, 1500);
+                }});
+            }}
+        </script>
+        """
+    elif text_content is not None:
+        json_text = _json.dumps(text_content)
+        body_html = f"""
+        <div style="max-width:1100px;margin:20px auto;padding:0 20px 60px;">
+            <pre style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:10px;padding:20px 24px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:13px;line-height:1.55;">{_html.escape(text_content)}</pre>
+        </div>
+        <script>
+            const rawText = {json_text};
+            function copyFileText(btn) {{
+                navigator.clipboard.writeText(rawText).then(() => {{
+                    const old = btn.textContent;
+                    btn.textContent = 'Copied ✓';
+                    setTimeout(() => btn.textContent = old, 1500);
+                }});
+            }}
+        </script>
+        """
+    else:
+        body_html = f"""
+        <div style="max-width:520px;margin:80px auto;text-align:center;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:12px;padding:32px;">
+            <h2 style="margin-bottom:8px;">{safe_name}</h2>
+            <p style="color:var(--text-muted);margin-bottom:20px;">Binary file ({size_bytes:,} bytes) — download to open locally.</p>
+            <a href="{_html.escape(download_url)}" download="{safe_name}" class="btn primary-btn">Download File</a>
+        </div>
+        """
+
+    extra_buttons = ""
+    if text_content is not None:
+        if is_markdown:
+            extra_buttons += '<button type="button" class="btn" style="padding:5px 10px;font-size:12px;" onclick="toggleRawMd(this)">View Raw</button>'
+        extra_buttons += '<button type="button" class="btn" style="padding:5px 10px;font-size:12px;" onclick="copyFileText(this)">Copy</button>'
+
+    page = f"""<!DOCTYPE html>
+<html lang="en" style="height:auto;overflow-y:auto;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Preview · {safe_name}</title>
+    <link rel="stylesheet" href="/static/style.css?v=12">
+    <script>
+        const savedTheme = localStorage.getItem('klyra_theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+    </script>
+</head>
+<body style="display:block;overflow:visible;height:auto;min-height:100vh;padding-top:52px;">
+    <header style="position:fixed;top:0;left:0;right:0;height:52px;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:8px 20px;background:var(--bg-tertiary);border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+            <span style="color:var(--accent);font-weight:700;">✦ Klyra Preview</span>
+            <code style="font-size:12.5px;color:var(--text-secondary);background:var(--bg-hover);padding:2px 8px;border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{safe_rel}</code>
+            <span style="font-size:11.5px;color:var(--text-muted);">({size_bytes:,} bytes)</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+            {extra_buttons}
+            <a href="{_html.escape(download_url)}" download="{safe_name}" class="btn primary-btn" style="padding:5px 12px;font-size:12px;">Download</a>
+        </div>
+    </header>
+    {body_html}
+</body>
+</html>"""
+    return HTMLResponse(page)
 
 
 @router.get("/api/download/{subject}/{folder:path}")
@@ -619,4 +807,421 @@ async def delete_index(
 
     background_tasks.add_task(delete_background)
     return {"message": f"Started deletion of {len(files_to_delete)} files", "task_id": task_id}
+
+
+_CHAT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+_CHAT_FILE_EXTS = {
+    ".pdf", ".txt", ".md", ".doc", ".docx", ".csv", ".json", ".tex",
+    ".py", ".c", ".cpp", ".h", ".java", ".js", ".ts", ".sql", ".sh",
+    ".bash", ".yaml", ".yml", ".xml", ".html", ".css", ".pptx", ".xlsx", ".rtf",
+}
+_CHAT_ALLOWED_EXTS = _CHAT_IMAGE_EXTS | _CHAT_FILE_EXTS
+_CONTENT_TYPE_TO_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+}
+_MAX_CHAT_ARTIFACT_BYTES = 25 * 1024 * 1024
+_IGNORED_GENERATED_EXTS = {".aux", ".log", ".out", ".toc", ".fls", ".fdb_latexmk", ".synctex.gz"}
+
+
+def _safe_artifact_filename(raw_name: str, fallback_ext: str = ".png") -> str:
+    """Return a filesystem-safe basename preserving allowed extension."""
+    base = Path(raw_name or f"artifact{fallback_ext}").name
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(base).stem).strip("._") or "artifact"
+    ext = Path(base).suffix.lower()
+    if ext not in _CHAT_ALLOWED_EXTS:
+        ext = fallback_ext
+    return f"{stem[:80]}{ext}"
+
+
+def _file_mtime_iso(fp: Path) -> str:
+    try:
+        return datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _artifact_source_for_rel(rel_path: str) -> str:
+    if rel_path.startswith(".chat_uploads/") or "/generated/uploads/" in rel_path:
+        return "uploaded"
+    return "generated"
+
+
+def _strip_upload_uuid_prefix(filename: str) -> str:
+    """Strip leading 8-hex-char upload prefix `<hex8>_<name>` for clean display."""
+    if len(filename) > 9 and filename[8] == "_" and all(c in "0123456789abcdef" for c in filename[:8]):
+        return filename[9:]
+    return filename
+
+
+@router.post("/api/chat/artifacts/upload")
+async def upload_chat_artifact(
+    file: UploadFile = File(...),
+    subject: str = Form(""),
+    session_id: str = Form(""),
+    user: UserRecord = Depends(get_current_user),
+):
+    """Upload an image or document artifact from the chat composer and record ownership."""
+    raw_name = file.filename or "artifact"
+    ext = Path(raw_name).suffix.lower()
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if ext not in _CHAT_ALLOWED_EXTS:
+        ext = _CONTENT_TYPE_TO_EXT.get(content_type, "")
+    if ext not in _CHAT_ALLOWED_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Attach images (PNG, JPG, GIF, WEBP, SVG) or documents (PDF, TXT, MD, DOC, DOCX, CSV, JSON, TEX, code).",
+        )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(data) > _MAX_CHAT_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds maximum allowed size of 25 MB.")
+
+    if user.role != "admin" and not repo.user_courses(user):
+        raise HTTPException(
+            status_code=403,
+            detail="You have no assigned subjects. Ask an administrator to assign your courses.",
+        )
+
+    subject_clean = subject.strip()
+    if subject_clean and not can_access_subject(user, subject_clean):
+        raise HTTPException(status_code=403, detail="You are not assigned to this subject.")
+
+    safe_name = _safe_artifact_filename(raw_name, fallback_ext=ext)
+    short_id = uuid.uuid4().hex[:8]
+    stored_name = f"{short_id}_{safe_name}"
+    docs_base = _docs_dir()
+
+    if subject_clean:
+        target_dir = docs_base / subject_clean / "generated" / "uploads"
+        rel_path = f"{subject_clean}/generated/uploads/{stored_name}"
+        owner_subject = subject_clean
+    else:
+        target_dir = docs_base / ".chat_uploads" / user.id
+        rel_path = f".chat_uploads/{user.id}/{stored_name}"
+        owner_subject = "_general"
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / stored_name
+    target_path.write_bytes(data)
+    repo.set_file_owner(rel_path, user.id, owner_subject)
+
+    is_image = ext in _CHAT_IMAGE_EXTS
+    mime_type = _MIME_TYPES.get(ext, content_type or "application/octet-stream")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    logger.info(
+        "Chat artifact uploaded by @%s: %s (subject=%s, session=%s, %d bytes)",
+        user.username,
+        rel_path,
+        subject_clean or "general",
+        session_id.strip() or "-",
+        len(data),
+    )
+    return {
+        "name": safe_name,
+        "rel_path": rel_path,
+        "url": f"/files/{rel_path}",
+        "preview_url": f"/preview/{rel_path}",
+        "download_url": f"/files/{rel_path}",
+        "file_type": ext,
+        "mime_type": mime_type,
+        "size": len(data),
+        "subject": subject_clean,
+        "session_id": session_id.strip(),
+        "source": "uploaded",
+        "is_image": is_image,
+        "category": "image" if is_image else "file",
+        "created_at": now_iso,
+    }
+
+
+def collect_user_artifacts(
+    target_user: UserRecord,
+    *,
+    strict_owner_only: bool = False,
+) -> dict:
+    """Collect uploaded and generated artifacts for ``target_user``.
+
+    When ``strict_owner_only`` is False (default, used by ``/api/artifacts``),
+    returns all artifacts visible to ``target_user`` across their sessions and
+    accessible subjects. When ``strict_owner_only`` is True (used by the Admin
+    Panel's per-user artifacts view), returns only artifacts belonging directly
+    to ``target_user`` (their own chat sessions, DB-owned files, and personal
+    ``.chat_uploads/<user_id>`` folder).
+    """
+    from klyra.web.routes.sessions import ACTIVE_SESSIONS
+
+    docs_base = _docs_dir()
+    docs_root = docs_base.resolve()
+    artifacts_by_key: dict[str, dict] = {}
+    chats_with_counts: dict[str, dict] = {}
+
+    owned_records = repo.list_files_by_owner(target_user.id)
+    owned_by_rel = {r.rel_path: r for r in owned_records}
+
+    def _register_artifact(entry: dict) -> None:
+        key = entry["key"]
+        existing = artifacts_by_key.get(key)
+        if existing is None:
+            artifacts_by_key[key] = entry
+        else:
+            if not existing.get("session_id") and entry.get("session_id"):
+                existing["session_id"] = entry["session_id"]
+                existing["session_title"] = entry["session_title"]
+            if entry.get("timestamp", "") > existing.get("timestamp", ""):
+                existing["timestamp"] = entry["timestamp"]
+            if entry.get("owned"):
+                existing["owned"] = True
+
+    def _add_file_artifact(
+        rel_raw: str,
+        display_name: str = "",
+        source_hint: str = "",
+        subject_hint: str = "",
+        session_id: str = "",
+        session_title: str = "",
+        timestamp: str = "",
+    ) -> None:
+        fp, rel_path = _resolve_docs_file(rel_raw, target_user)
+        if not fp or not fp.exists() or not fp.is_file():
+            return
+        if not strict_owner_only and not can_read_generated_file(target_user, rel_path):
+            return
+        ext = fp.suffix.lower()
+        if ext in _IGNORED_GENERATED_EXTS or fp.name.startswith("."):
+            return
+        parts = rel_path.split("/")
+        inferred_subject = "" if parts[0] == ".chat_uploads" else parts[0]
+        subject_val = (subject_hint or inferred_subject).strip()
+        if subject_val == "_general":
+            subject_val = ""
+        source_val = source_hint or _artifact_source_for_rel(rel_path)
+        name_val = display_name or (
+            _strip_upload_uuid_prefix(fp.name) if source_val == "uploaded" else fp.name
+        )
+        owned_rec = owned_by_rel.get(rel_path)
+        ts_val = timestamp or (owned_rec.created_at if owned_rec else "") or _file_mtime_iso(fp)
+        try:
+            size_val = fp.stat().st_size
+        except OSError:
+            size_val = 0
+        _register_artifact(
+            {
+                "key": rel_path,
+                "name": name_val,
+                "rel_path": rel_path,
+                "url": f"/files/{rel_path}",
+                "preview_url": f"/preview/{rel_path}",
+                "download_url": f"/files/{rel_path}",
+                "file_type": ext,
+                "mime_type": _MIME_TYPES.get(ext, "application/octet-stream"),
+                "is_image": ext in _CHAT_IMAGE_EXTS,
+                "category": "image" if ext in _CHAT_IMAGE_EXTS else "file",
+                "size": size_val,
+                "source": source_val,
+                "subject": subject_val,
+                "session_id": session_id,
+                "session_title": session_title,
+                "timestamp": ts_val,
+                "owned": owned_rec is not None,
+                "exists": True,
+            }
+        )
+
+    # 1. Scan chat sessions
+    session_owner_filter = (
+        target_user.id
+        if strict_owner_only or target_user.role != "admin"
+        else None
+    )
+    db_sessions = repo.list_chat_sessions(owner_id=session_owner_filter)
+    for rec in db_sessions:
+        sid = rec.session_id
+        title = rec.title or "Untitled Chat"
+        history: list = []
+        active = ACTIVE_SESSIONS.get(sid)
+        if active and active.get("history"):
+            history = list(active["history"])
+        elif isinstance(rec.ui_history_json, list):
+            history = list(rec.ui_history_json)
+        elif isinstance(rec.ui_history_json, str) and rec.ui_history_json:
+            try:
+                parsed = json.loads(rec.ui_history_json)
+                if isinstance(parsed, list):
+                    history = parsed
+            except json.JSONDecodeError:
+                history = []
+
+        for ev in history:
+            if not isinstance(ev, dict):
+                continue
+            ev_type = ev.get("type", "")
+            ev_ts = str(ev.get("timestamp") or rec.modified_at or rec.created_at or "")
+            if ev_type == "user_transcript" and isinstance(ev.get("attachments"), list):
+                for att in ev["attachments"]:
+                    if not isinstance(att, dict):
+                        continue
+                    rel_raw = str(att.get("rel_path") or "").strip()
+                    if not rel_raw and str(att.get("url", "")).startswith("/files/"):
+                        rel_raw = str(att["url"])[len("/files/") :]
+                    if not rel_raw:
+                        continue
+                    _add_file_artifact(
+                        rel_raw=rel_raw,
+                        display_name=str(att.get("name") or ""),
+                        source_hint="uploaded",
+                        subject_hint=str(att.get("subject") or ""),
+                        session_id=sid,
+                        session_title=title,
+                        timestamp=ev_ts,
+                    )
+            elif ev_type == "file_link":
+                url = str(ev.get("url") or "").strip()
+                name = str(ev.get("name") or "").strip()
+                if url.startswith("/files/"):
+                    _add_file_artifact(
+                        rel_raw=url[len("/files/") :],
+                        display_name=name,
+                        session_id=sid,
+                        session_title=title,
+                        timestamp=ev_ts,
+                    )
+                elif url.startswith("/api/download/"):
+                    tail = url[len("/api/download/") :]
+                    subj = tail.split("/", 1)[0] if "/" in tail else ""
+                    if subj and (strict_owner_only or can_access_subject(target_user, subj)):
+                        _register_artifact(
+                            {
+                                "key": url,
+                                "name": name or Path(tail).name or "bundle.zip",
+                                "rel_path": tail,
+                                "url": url,
+                                "preview_url": "",
+                                "download_url": url,
+                                "file_type": ".zip",
+                                "mime_type": "application/zip",
+                                "is_image": False,
+                                "category": "file",
+                                "size": 0,
+                                "source": "generated",
+                                "subject": subj,
+                                "session_id": sid,
+                                "session_title": title,
+                                "timestamp": ev_ts,
+                                "owned": False,
+                                "exists": True,
+                            }
+                        )
+
+    # 2. Include DB-owned files & disk files
+    accessible_subjects: list[str] = []
+    if strict_owner_only:
+        for rec in owned_records:
+            subj_val = "" if rec.subject == "_general" else (rec.subject or "")
+            _add_file_artifact(
+                rel_raw=rec.rel_path,
+                subject_hint=subj_val,
+                timestamp=rec.created_at or "",
+            )
+        accessible_subjects = sorted(repo.user_courses(target_user))
+    else:
+        if target_user.role == "admin":
+            if docs_base.exists():
+                accessible_subjects = sorted(
+                    p.name for p in docs_base.iterdir() if p.is_dir() and not p.name.startswith(".")
+                )
+        else:
+            accessible_subjects = sorted(repo.user_courses(target_user))
+
+        for subj in accessible_subjects:
+            for scan_root in (docs_base / subj / "generated", docs_base / subj / ".assets" / "generated"):
+                if not scan_root.exists():
+                    continue
+                for fp in sorted(scan_root.rglob("*")):
+                    if not fp.is_file():
+                        continue
+                    try:
+                        rel_path = fp.resolve().relative_to(docs_root).as_posix()
+                    except ValueError:
+                        continue
+                    if rel_path not in artifacts_by_key:
+                        _add_file_artifact(rel_raw=rel_path, subject_hint=subj)
+
+    uploads_base = docs_base / ".chat_uploads"
+    if uploads_base.exists():
+        scan_dirs = (
+            [p for p in uploads_base.iterdir() if p.is_dir()]
+            if (not strict_owner_only and target_user.role == "admin")
+            else [uploads_base / target_user.id]
+        )
+        for udir in scan_dirs:
+            if not udir.exists() or not udir.is_dir():
+                continue
+            for fp in sorted(udir.rglob("*")):
+                if not fp.is_file():
+                    continue
+                try:
+                    rel_path = fp.resolve().relative_to(docs_root).as_posix()
+                except ValueError:
+                    continue
+                if rel_path not in artifacts_by_key:
+                    _add_file_artifact(rel_raw=rel_path, source_hint="uploaded")
+
+    artifacts = sorted(
+        artifacts_by_key.values(),
+        key=lambda item: item.get("timestamp") or "",
+        reverse=True,
+    )
+
+    subjects_set = set(accessible_subjects)
+    for item in artifacts:
+        if item.get("subject"):
+            subjects_set.add(item["subject"])
+        sid = item.get("session_id") or ""
+        if sid:
+            entry = chats_with_counts.setdefault(
+                sid,
+                {
+                    "id": sid,
+                    "title": item.get("session_title") or "Untitled Chat",
+                    "count": 0,
+                    "latest": item.get("timestamp") or "",
+                },
+            )
+            entry["count"] += 1
+            if (item.get("timestamp") or "") > entry["latest"]:
+                entry["latest"] = item["timestamp"]
+
+    chats = sorted(chats_with_counts.values(), key=lambda c: c.get("latest") or "", reverse=True)
+    uploaded_count = sum(1 for a in artifacts if a.get("source") == "uploaded")
+    generated_count = sum(1 for a in artifacts if a.get("source") != "uploaded")
+    return {
+        "artifacts": artifacts,
+        "subjects": sorted(subjects_set),
+        "chats": chats,
+        "uploaded_count": uploaded_count,
+        "generated_count": generated_count,
+    }
+
+
+@router.get("/api/artifacts")
+async def list_artifacts(user: UserRecord = Depends(get_current_user)):
+    """List user-uploaded and Klyra-generated artifacts visible to the user, linked to subjects & chats."""
+    return collect_user_artifacts(user, strict_owner_only=False)
+
 

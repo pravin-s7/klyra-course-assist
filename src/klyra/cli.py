@@ -245,8 +245,12 @@ def _cmd_voice(args: argparse.Namespace) -> int:
             f"\nDetails: {exc}"
         ) from exc
 
-    transport = PyAudioTransport()
-    orchestrator = VoiceOrchestrator(transport=transport, voice_name=args.voice)
+    transport = PyAudioTransport(enable_output=args.voice_response)
+    orchestrator = VoiceOrchestrator(
+        transport=transport,
+        voice_name=args.voice,
+        voice_response=args.voice_response,
+    )
     try:
         asyncio.run(orchestrator.run())
     except KeyboardInterrupt:
@@ -293,9 +297,12 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 
 def _cmd_web(args: argparse.Namespace) -> int:
+    import os
     import uvicorn
     import webbrowser
     import threading
+
+    os.environ["KLYRA_VOICE_RESPONSE"] = "1" if args.voice_response else "0"
 
     host = args.host
     port = args.port
@@ -307,7 +314,8 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    print(f"\n  🌐  Starting Klyra web UI at http://{host}:{port}")
+    mode_label = "voice-response enabled" if args.voice_response else "text response only"
+    print(f"\n  🌐  Starting Klyra web UI at http://{host}:{port} ({mode_label})")
     print("  Press Ctrl+C to stop.\n")
 
     uvicorn.run(
@@ -515,6 +523,13 @@ def build_parser() -> argparse.ArgumentParser:
         help='Voice name (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr). '
              'Default: KLYRA_VOICE_NAME env var or "Puck"',
     )
+    p_voice.add_argument(
+        "--voice-response",
+        action="store_true",
+        default=False,
+        dest="voice_response",
+        help="Speak Klyra's responses aloud via audio output (default: text chat response only)",
+    )
     p_voice.set_defaults(func=_cmd_voice)
 
     p_chat = sub.add_parser(
@@ -529,6 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8765)
+    p_web.add_argument(
+        "--voice-response",
+        action="store_true",
+        default=False,
+        dest="voice_response",
+        help="Stream Klyra's spoken audio responses in the web UI (default: text output only)",
+    )
     p_web.set_defaults(func=_cmd_web)
 
     p_skill = sub.add_parser(

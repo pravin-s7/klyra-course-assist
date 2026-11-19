@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import struct
 
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from klyra.auth.dependencies import websocket_user
+from klyra.auth.dependencies import can_read_generated_file, websocket_user
 from klyra.storage import repo
+from klyra.web.routes.files import _resolve_docs_file
 from klyra.web.routes.sessions import (
     ACTIVE_SESSIONS,
     _load_session_from_db,
@@ -20,6 +26,32 @@ from klyra.web.routes.ws_voice import _run_voice_session, _sanitize, _stop_voice
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _format_chat_error(exc: Exception) -> str:
+    """Format an LLM / backend exception into a clear user-facing Markdown alert."""
+    raw = str(exc).strip()
+    upper = raw.upper()
+    if "503" in upper or "UNAVAILABLE" in upper:
+        return (
+            "⚠️ **Model Temporarily Unavailable (503):** "
+            "The Gemini model is currently experiencing high demand. "
+            "Automatic retries were attempted, but the service is still busy. "
+            "Please wait a few seconds and try sending your message again."
+        )
+    if "429" in upper or "RESOURCE_EXHAUSTED" in upper or "QUOTA" in upper:
+        return (
+            "⚠️ **Rate Limit / Quota Exceeded (429):** "
+            "The Gemini API rate limit or quota was reached. "
+            "Please wait a moment before retrying, or check your API key quota in the Admin Panel."
+        )
+    if "API_KEY_INVALID" in upper or "401" in upper or "403" in upper:
+        return (
+            "⚠️ **Authentication / Permission Error:** "
+            f"The Gemini API rejected the request (`{raw[:200]}`). "
+            "Please verify `GEMINI_API_KEY` in the Admin Panel."
+        )
+    return f"⚠️ **Error generating response:** `{raw[:300]}`"
 
 
 @router.websocket("/ws")
@@ -52,33 +84,51 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
             if len(chat_history_for_voice) > 0:
                 for e in chat_history_for_voice:
                     if isinstance(e, dict) and e.get("type") == "user_transcript":
-                        title = e.get("text", "")
-                        break
-                    elif isinstance(e, (list, tuple)):
-                        title = e[1]
+                        cand = (e.get("text") or "").strip()
+                        if not cand and isinstance(e.get("attachments"), list) and e["attachments"]:
+                            first_att = e["attachments"][0]
+                            cand = f"Attachment: {first_att.get('name', 'file')}"
+                        if cand:
+                            title = cand
+                            break
+                    elif isinstance(e, (list, tuple)) and len(e) >= 2 and e[1]:
+                        title = str(e[1])
                         break
             title = (title[:30] + "...") if len(title) > 30 else title
             _save_session_to_db(session_id, user.id, title, orchestrator, chat_history_for_voice)
 
+    turn_state = {"emitted_text": False}
+
     async def on_text(text: str):
-        event = {"type": "klyra_text", "text": text}
-        chat_history_for_voice.append(event)
-        await ws.send_json(event)
+        if not text:
+            return
+        ts = _utc_now()
+        turn_state["emitted_text"] = True
+        if (
+            chat_history_for_voice
+            and isinstance(chat_history_for_voice[-1], dict)
+            and chat_history_for_voice[-1].get("type") == "klyra_text"
+        ):
+            chat_history_for_voice[-1]["text"] += text
+            chat_history_for_voice[-1]["timestamp"] = ts
+        else:
+            chat_history_for_voice.append({"type": "klyra_text", "text": text, "timestamp": ts})
+        await ws.send_json({"type": "klyra_text", "text": text, "timestamp": ts})
 
     async def on_tool_start(name: str, args: dict):
-        event = {"type": "tool_start", "tool": name, "args": _sanitize(args)}
+        event = {"type": "tool_start", "tool": name, "args": _sanitize(args), "timestamp": _utc_now()}
         chat_history_for_voice.append(event)
         await ws.send_json(event)
         _sync_save()
 
     async def on_tool_done(name: str, status: str, message: str):
-        event = {"type": "tool_done", "tool": name, "status": status, "message": message[:500]}
+        event = {"type": "tool_done", "tool": name, "status": status, "message": message[:500], "timestamp": _utc_now()}
         chat_history_for_voice.append(event)
         await ws.send_json(event)
         _sync_save()
 
     async def on_file_link(name: str, url: str, file_type: str):
-        event = {"type": "file_link", "name": name, "url": url, "file_type": file_type}
+        event = {"type": "file_link", "name": name, "url": url, "file_type": file_type, "timestamp": _utc_now()}
         chat_history_for_voice.append(event)
         await ws.send_json(event)
         _sync_save()
@@ -191,39 +241,103 @@ async def websocket_chat(ws: WebSocket, session_id: str = None):
 
                 if msg_type == "chat":
                     user_text = msg.get("text", "").strip()
-                    if not user_text:
+                    raw_attachments = msg.get("attachments") or []
+                    stored_attachments: list[dict] = []
+                    model_attachments: list[dict] = []
+                    if isinstance(raw_attachments, list):
+                        for item in raw_attachments[:10]:
+                            if not isinstance(item, dict):
+                                continue
+                            rel_raw = str(item.get("rel_path") or "").strip()
+                            if not rel_raw:
+                                continue
+                            fp, rel = _resolve_docs_file(rel_raw, user)
+                            if not fp or not fp.exists() or not fp.is_file():
+                                continue
+                            if not can_read_generated_file(user, rel):
+                                continue
+                            name = str(item.get("name") or fp.name)
+                            mime_type = str(item.get("mime_type") or "application/octet-stream")
+                            subj = str(item.get("subject") or "")
+                            ext = fp.suffix.lower()
+                            is_img = bool(
+                                item.get("is_image")
+                                if "is_image" in item
+                                else ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+                            )
+                            meta = {
+                                "name": name,
+                                "rel_path": rel,
+                                "url": f"/files/{rel}",
+                                "preview_url": f"/preview/{rel}",
+                                "download_url": f"/files/{rel}",
+                                "mime_type": mime_type,
+                                "file_type": ext,
+                                "is_image": is_img,
+                                "subject": subj,
+                                "source": "uploaded",
+                            }
+                            stored_attachments.append(meta)
+                            model_attachments.append({**meta, "path": str(fp)})
+
+                    if not user_text and not stored_attachments:
                         continue
 
                     if voice_session_ref["active"]:
                         await _stop_voice(voice_session_task, voice_session_ref)
 
-                    user_event = {"type": "user_transcript", "text": user_text, "final": True}
+                    user_event = {
+                        "type": "user_transcript",
+                        "text": user_text,
+                        "final": True,
+                        "timestamp": _utc_now(),
+                    }
+                    if stored_attachments:
+                        user_event["attachments"] = stored_attachments
                     chat_history_for_voice.append(user_event)
+                    logger.info(
+                        "Prompt from @%s (session=%s, attachments=%d): %s",
+                        user.username,
+                        session_id,
+                        len(stored_attachments),
+                        user_text[:120],
+                    )
                     _sync_save()
 
-                    async def process_chat(text):
+                    async def process_chat(text, atts):
+                        turn_state["emitted_text"] = False
                         try:
-                            await orchestrator.send_message(text)
+                            await orchestrator.send_message(text, attachments=atts or None)
                         except asyncio.CancelledError:
-                            logger.info("Chat task cancelled by user")
-                            await ws.send_json(
-                                {
-                                    "type": "tool_log",
-                                    "tool": "System",
-                                    "text": "Generation stopped by user.",
-                                }
+                            logger.info("Chat task cancelled by user (@%s)", user.username)
+                            stop_msg = (
+                                "\n\n_The response has been stopped._"
+                                if turn_state["emitted_text"]
+                                else "The response has been stopped."
                             )
-                        except Exception as e:
-                            logger.error("Error in chat task: %s", e)
-                        finally:
-                            chat_history_for_voice.append({"type": "turn_complete"})
                             try:
-                                await ws.send_json({"type": "turn_complete"})
+                                await on_text(stop_msg)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.error("Error in chat task (user=@%s): %s", user.username, e)
+                            err_msg = _format_chat_error(e)
+                            try:
+                                await on_text(err_msg)
+                            except Exception:
+                                pass
+                        finally:
+                            tc_event = {"type": "turn_complete", "timestamp": _utc_now()}
+                            chat_history_for_voice.append(tc_event)
+                            try:
+                                await ws.send_json(tc_event)
                             except Exception:
                                 pass
                             _sync_save()
 
-                    text_session_task = asyncio.create_task(process_chat(user_text))
+                    text_session_task = asyncio.create_task(
+                        process_chat(user_text, model_attachments)
+                    )
 
                 elif msg_type == "chat_stop":
                     if text_session_task and not text_session_task.done():

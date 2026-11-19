@@ -57,6 +57,8 @@ def can_read_generated_file(user: UserRecord, rel_path: str) -> bool:
     parts = rel_path.split("/")
     if len(parts) < 2:
         return False
+    if parts[0] == ".chat_uploads":
+        return len(parts) >= 3 and parts[1] == user.id
     subject = parts[0]
     if not can_access_subject(user, subject):
         return False

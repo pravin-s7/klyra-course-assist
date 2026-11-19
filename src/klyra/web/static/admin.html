@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Klyra Admin Console</title>
-    <link rel="stylesheet" href="/static/style.css?v=3">
-    <link rel="stylesheet" href="/static/login.css?v=2">
-    <link rel="stylesheet" href="/static/admin.css?v=3">
+    <link rel="stylesheet" href="/static/style.css?v=7">
+    <link rel="stylesheet" href="/static/login.css?v=3">
+    <link rel="stylesheet" href="/static/admin.css?v=11">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0" rel="stylesheet">
 </head>
@@ -18,18 +18,21 @@
                 <span class="logo-icon material-symbols-outlined">admin_panel_settings</span>
                 <div>
                     <div class="admin-brand-title">Klyra Admin</div>
-                    <div class="admin-brand-sub">Console · RBAC &amp; courses</div>
+                    <div class="admin-brand-sub">Console · RBAC, Courses &amp; Infrastructure</div>
                 </div>
             </div>
             <div class="admin-topbar-right">
-                <button class="action-btn" id="themeToggle" title="Toggle theme">
+                <span id="adminDisplayName" class="user-badge"></span>
+                <button class="action-btn" id="themeToggle" type="button" title="Toggle light/dark theme">
                     <span class="material-symbols-outlined icon-sun">light_mode</span>
                     <span class="material-symbols-outlined icon-moon">dark_mode</span>
                 </button>
-                <a href="/" class="btn">← Back to Chat</a>
-                <span id="adminDisplayName" style="margin-right: 15px; font-weight: 500;"></span>
-                <button class="btn" id="adminLogoutBtn">
-                    <span class="material-symbols-outlined">logout</span>
+                <a href="/" class="btn">
+                    <span class="material-symbols-outlined" style="font-size:18px;">arrow_back</span>
+                    Back to Chat
+                </a>
+                <button class="btn" id="adminLogoutBtn" type="button">
+                    <span class="material-symbols-outlined" style="font-size:18px;">logout</span>
                     Sign out
                 </button>
             </div>
@@ -44,140 +47,118 @@
         <main id="adminMain" style="display:none;">
             <div class="admin-layout">
                 <!-- Sidebar nav -->
-                <nav class="admin-nav">
-                    <button class="admin-nav-item active" data-view="overview">
+                <nav class="admin-nav" aria-label="Admin sections">
+                    <button class="admin-nav-item active" type="button" data-view="overview">
                         <span class="material-symbols-outlined">dashboard</span>
                         Overview
                     </button>
-                    <button class="admin-nav-item" data-view="users">
+                    <button class="admin-nav-item" type="button" data-view="users">
                         <span class="material-symbols-outlined">group</span>
                         Users
                     </button>
-                    <button class="admin-nav-item" data-view="courses">
+                    <button class="admin-nav-item" type="button" data-view="chats">
+                        <span class="material-symbols-outlined">chat</span>
+                        Chats
+                    </button>
+                    <button class="admin-nav-item" type="button" data-view="artifacts">
+                        <span class="material-symbols-outlined">collections_bookmark</span>
+                        Artifacts
+                    </button>
+                    <button class="admin-nav-item" type="button" data-view="courses">
                         <span class="material-symbols-outlined">library_books</span>
                         Courses
                     </button>
-                    <button class="admin-nav-item" data-view="settings">
+                    <button class="admin-nav-item" type="button" data-view="settings">
                         <span class="material-symbols-outlined">settings</span>
                         Settings
                     </button>
+                    <button class="admin-nav-item" type="button" data-view="logs">
+                        <span class="material-symbols-outlined">terminal</span>
+                        Logs &amp; Jobs
+                    </button>
                 </nav>
 
-                <!-- Panels -->
-<!-- ═══ OVERVIEW ═══ -->
+                <!-- Main view container -->
+                <div class="admin-panels">
+                    <!-- ═══ OVERVIEW ═══ -->
                     <section class="admin-view" id="view-overview">
-                        <div class="admin-page-title"><h1>Overview</h1><p>Platform activity at a glance.</p></div>
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>Overview</h1>
+                                <p>Platform activity, courses, and recent sessions at a glance.</p>
+                            </div>
+                            <div class="admin-quick-actions">
+                                <button class="btn primary-btn" type="button" onclick="openCreateUserModal()">
+                                    <span class="material-symbols-outlined">person_add</span> New User
+                                </button>
+                                <button class="btn" type="button" onclick="document.getElementById('createSubjectModal').showModal()">
+                                    <span class="material-symbols-outlined">create_new_folder</span> New Subject
+                                </button>
+                                <button class="btn" type="button" onclick="switchView('logs')">
+                                    <span class="material-symbols-outlined">terminal</span> View Logs
+                                </button>
+                            </div>
+                        </div>
+
                         <div class="stat-grid" id="statCards"><!-- JS --></div>
 
+                        <div id="systemHealthStrip" class="subject-cloud" style="margin-bottom:20px;"><!-- JS --></div>
+
+                        <div class="overview-two-col">
+                            <div class="admin-card">
+                                <div class="card-toolbar">
+                                    <h2>Discovered Courses (<code>docs/</code>)</h2>
+                                    <button class="btn small-btn" type="button" onclick="switchView('courses')">Manage Courses →</button>
+                                </div>
+                                <div id="subjectsOverview" class="subject-cloud"><!-- JS --></div>
+                            </div>
+
+                            <div class="admin-card">
+                                <div class="card-toolbar">
+                                    <h2>Recent Chat Activity</h2>
+                                    <button class="btn small-btn" type="button" onclick="loadStats()">
+                                        <span class="material-symbols-outlined" style="font-size:15px;">refresh</span> Refresh
+                                    </button>
+                                </div>
+                                <div id="recentSessionsList" class="detail-list"><!-- JS --></div>
+                            </div>
+                        </div>
                     </section>
 
                     <!-- ═══ USERS ═══ -->
                     <section class="admin-view" id="view-users" style="display:none;">
-                        <div class="admin-page-title">
-                            <h1>Users</h1>
-                            <p>Create accounts, assign roles &amp; courses, inspect their data.</p>
-                        </div>
-
-                        <div class="card-toolbar" style="margin-bottom: 20px; display: flex; justify-content: flex-end;">
-                            <button class="btn primary-btn" onclick="document.getElementById('createUserModal').showModal()">
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>Users &amp; Access Control</h1>
+                                <p>Create accounts, assign roles &amp; courses, and inspect user sessions and generated files.</p>
+                            </div>
+                            <button class="btn primary-btn" type="button" onclick="openCreateUserModal()">
                                 <span class="material-symbols-outlined">person_add</span> Create New User
                             </button>
                         </div>
 
-                        <dialog id="createUserModal" class="modal detail-modal" style="width: min(500px, 92vw);">
-                            <div class="modal-header">
-                                <h3>Create New User</h3>
-                                <button class="modal-close" onclick="this.closest('dialog').close()">×</button>
-                            </div>
-                            <form id="createUserForm" class="admin-form" style="display: flex; flex-direction: column; gap: 16px;">
-                                <div class="admin-field">
-                                    <label>Username</label>
-                                    <input id="newUsername" required minlength="2" placeholder="e.g. prof.ramesh" autocomplete="off">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Full Name</label>
-                                    <input id="newFullName" placeholder="e.g. Ramesh Kumar" autocomplete="off">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Email</label>
-                                    <input id="newEmail" type="email" placeholder="e.g. ramesh@klyra.edu" autocomplete="off">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Password (min 6 chars)</label>
-                                    <input id="newPassword" type="password" required minlength="6" autocomplete="new-password">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Role</label>
-                                    <select id="newRole">
-                                        <option value="instructor" selected>Instructor</option>
-                                        <option value="admin">Admin</option>
-                                    </select>
-                                </div>
-                                <div class="admin-field">
-                                    <label>Courses (comma-separated subject IDs)</label>
-                                    <input id="newCourses" placeholder="e.g. dbms, python-basics" autocomplete="off">
-                                </div>
-                                <p id="createError" class="login-error" style="display:none;"></p>
-                                <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px;">
-                                    <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
-                                    <button type="submit" class="btn primary-btn">Create User</button>
-                                </div>
-                            </form>
-                        </dialog>
-
-                        <dialog id="editUserModal" class="modal detail-modal" style="width: min(500px, 92vw);">
-                            <div class="modal-header">
-                                <h3>Edit User</h3>
-                                <button class="modal-close" onclick="this.closest('dialog').close()">×</button>
-                            </div>
-                            <form id="editUserForm" class="admin-form" style="display: flex; flex-direction: column; gap: 16px;">
-                                <input type="hidden" id="editUserId">
-                                <div class="admin-field">
-                                    <label>Full Name</label>
-                                    <input id="editFullName" placeholder="e.g. Ramesh Kumar" autocomplete="off">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Email</label>
-                                    <input id="editEmail" type="email" placeholder="e.g. ramesh@klyra.edu" autocomplete="off">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Password (leave blank to keep current)</label>
-                                    <input id="editPassword" type="password" placeholder="New password" autocomplete="off">
-                                </div>
-                                <div class="admin-field">
-                                    <label>Role</label>
-                                    <select id="editRole">
-                                        <option value="instructor">Instructor</option>
-                                        <option value="admin">Admin</option>
-                                    </select>
-                                </div>
-                                <div class="admin-field">
-                                    <label>Courses (comma-separated subject IDs)</label>
-                                    <input id="editCourses" placeholder="e.g. dbms, python-basics" autocomplete="off">
-                                </div>
-                                <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px;">
-                                    <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
-                                    <button type="submit" class="btn primary-btn">Save Changes</button>
-                                </div>
-                            </form>
-                        </dialog>
-
                         <div class="admin-card">
                             <div class="card-toolbar">
-                                <h2>All Users</h2>
-                                <input id="usersSearch" class="search-input" type="search" placeholder="Search username / course…">
+                                <h2>All Users <span class="count-badge" id="usersCountBadge">0</span></h2>
+                                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                                    <select id="usersRoleFilter" class="course-user-select" style="min-width:140px;">
+                                        <option value="">All roles</option>
+                                        <option value="admin">Admins</option>
+                                        <option value="instructor">Instructors</option>
+                                    </select>
+                                    <input id="usersSearch" class="search-input" type="search" placeholder="Search username, name, email, course…">
+                                </div>
                             </div>
                             <div class="table-wrap">
                                 <table class="admin-table" id="usersTable">
                                     <thead>
                                         <tr>
                                             <th>User</th>
-                                            <th>Name</th>
+                                            <th>Full Name</th>
                                             <th>Email</th>
                                             <th>Role</th>
-                                            <th>Courses</th>
-                                            <th style="width: 340px;">Manage</th>
-                                            <th></th>
+                                            <th>Assigned Courses</th>
+                                            <th style="width: 260px; text-align:right;">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody id="usersBody"></tbody>
@@ -185,107 +166,488 @@
                             </div>
                         </div>
                     </section>
-<!-- ═══ COURSES ═══ -->
-                    <section class="admin-view" id="view-courses" style="display:none;">
-                        <div class="admin-page-title">
-                            <h1>Courses</h1>
-                            <p>Subjects discovered under <code>docs/</code> and who is assigned to them.</p>
+
+                    <!-- ═══ CHATS (ALL USERS) ═══ -->
+                    <section class="admin-view" id="view-chats" style="display:none;">
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>User Chats</h1>
+                                <p>Inspect and manage chat sessions across all users, including uploaded attachments and generated outputs.</p>
+                            </div>
+                            <button class="btn" type="button" onclick="loadAdminAllChats()">
+                                <span class="material-symbols-outlined">refresh</span> Refresh
+                            </button>
                         </div>
-                        <div class="card-toolbar" style="margin-bottom: 20px; display: flex; gap: 12px;">
-                            <input id="coursesSearch" class="search-input" type="search" placeholder="Search courses…" style="flex: 1;">
-                            <button class="btn primary-btn" onclick="document.getElementById('createSubjectModal').showModal()" style="white-space: nowrap;">
+
+                        <div class="admin-card">
+                            <div class="user-data-filter-bar" style="margin-bottom:14px;">
+                                <div class="user-data-filter-row">
+                                    <input id="adminChatSearch" class="search-input" type="search" placeholder="Search chat title, user, prompt preview, session ID…" oninput="filterAdminAllChats()">
+                                    <select id="adminChatUserFilter" class="course-user-select" onchange="filterAdminAllChats()">
+                                        <option value="">All Users</option>
+                                    </select>
+                                    <select id="adminChatTimePreset" class="course-user-select" onchange="onAdminChatsTimePresetChange()">
+                                        <option value="">All Time</option>
+                                        <option value="24h">Last 24 Hours</option>
+                                        <option value="7d">Last 7 Days</option>
+                                        <option value="30d">Last 30 Days</option>
+                                        <option value="custom">Custom Range</option>
+                                    </select>
+                                    <button type="button" class="btn small-btn" onclick="resetAdminAllChatsFilters()">Reset</button>
+                                </div>
+                                <div class="user-data-filter-row">
+                                    <div class="admin-art-tabs" id="adminAllChatTabs">
+                                        <button type="button" class="admin-art-tab active" data-mode="all" onclick="setAdminAllChatsMode('all')">All Chats <span class="count-badge" id="adminAllChatCountAll">0</span></button>
+                                        <button type="button" class="admin-art-tab" data-mode="attachments" onclick="setAdminAllChatsMode('attachments')">With Attachments <span class="count-badge" id="adminAllChatCountAtt">0</span></button>
+                                        <button type="button" class="admin-art-tab" data-mode="files" onclick="setAdminAllChatsMode('files')">With Generated Files <span class="count-badge" id="adminAllChatCountFiles">0</span></button>
+                                    </div>
+                                    <label class="log-date-field" style="margin-left:auto;">
+                                        <span>From</span>
+                                        <input id="adminChatStartDate" type="datetime-local" onchange="onAdminChatsCustomDateChange()">
+                                    </label>
+                                    <label class="log-date-field">
+                                        <span>To</span>
+                                        <input id="adminChatEndDate" type="datetime-local" onchange="onAdminChatsCustomDateChange()">
+                                    </label>
+                                </div>
+                            </div>
+                            <div id="adminAllChatsList" class="detail-list"><!-- JS --></div>
+                        </div>
+                    </section>
+
+                    <!-- ═══ ARTIFACTS (ALL USERS) ═══ -->
+                    <section class="admin-view" id="view-artifacts" style="display:none;">
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>User Artifacts</h1>
+                                <p>Inspect uploaded and generated artifacts across all users, linked to their courses and chat sessions.</p>
+                            </div>
+                            <button class="btn" type="button" onclick="loadAdminAllArtifacts()">
+                                <span class="material-symbols-outlined">refresh</span> Refresh
+                            </button>
+                        </div>
+
+                        <div class="admin-card">
+                            <div class="user-data-filter-bar" style="margin-bottom:14px;">
+                                <div class="user-data-filter-row">
+                                    <input id="adminArtSearch" class="search-input" type="search" placeholder="Search filename, user, course, chat…" oninput="filterAdminAllArtifacts()">
+                                    <select id="adminArtUserFilter" class="course-user-select" onchange="filterAdminAllArtifacts()">
+                                        <option value="">All Users</option>
+                                    </select>
+                                    <select id="adminArtCourseFilter" class="course-user-select" onchange="filterAdminAllArtifacts()">
+                                        <option value="">All Courses</option>
+                                    </select>
+                                    <select id="adminArtTypeFilter" class="course-user-select" onchange="filterAdminAllArtifacts()">
+                                        <option value="">All File Types</option>
+                                        <option value=".png">Image (.png/.jpg)</option>
+                                        <option value=".pdf">PDF (.pdf)</option>
+                                        <option value=".md">Markdown (.md)</option>
+                                        <option value=".json">JSON (.json)</option>
+                                        <option value=".docx">Word (.doc/.docx)</option>
+                                        <option value=".py">Code (.py/.sql/.sh)</option>
+                                        <option value=".zip">Archive (.zip)</option>
+                                    </select>
+                                    <button type="button" class="btn small-btn" onclick="resetAdminAllArtifactsFilters()">Reset</button>
+                                </div>
+                                <div class="admin-art-tabs" id="adminAllArtTabs">
+                                    <button type="button" class="admin-art-tab active" data-source="all" onclick="setAdminAllArtifactsSource('all')">All <span class="count-badge" id="adminAllArtCountAll">0</span></button>
+                                    <button type="button" class="admin-art-tab" data-source="uploaded" onclick="setAdminAllArtifactsSource('uploaded')">Uploaded <span class="count-badge" id="adminAllArtCountUploaded">0</span></button>
+                                    <button type="button" class="admin-art-tab" data-source="generated" onclick="setAdminAllArtifactsSource('generated')">Generated <span class="count-badge" id="adminAllArtCountGenerated">0</span></button>
+                                </div>
+                            </div>
+                            <div id="adminAllArtifactsList" class="detail-list"><!-- JS --></div>
+                        </div>
+                    </section>
+
+                    <!-- ═══ COURSES ═══ -->
+                    <section class="admin-view" id="view-courses" style="display:none;">
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>Courses &amp; Subject Profiles</h1>
+                                <p>Subjects discovered under <code>docs/</code>, instructor assignments, files, and <code>skill.md</code> configurations.</p>
+                            </div>
+                            <button class="btn primary-btn" type="button" onclick="document.getElementById('createSubjectModal').showModal()">
                                 <span class="material-symbols-outlined">add</span> Create Subject
                             </button>
                         </div>
-                        <div id="coursesList" class="course-grid"><!-- JS --></div>
-                        
-                        <dialog id="createSubjectModal" class="modal detail-modal" style="width: min(400px, 92vw);">
-                            <div class="modal-header">
-                                <h3>Create New Subject</h3>
-                                <button class="modal-close" onclick="this.closest('dialog').close()">×</button>
-                            </div>
-                            <form id="createSubjectForm" class="admin-form" style="display: flex; flex-direction: column; gap: 16px;">
-                                <div class="admin-field">
-                                    <label>Subject Name (alphanumeric & dashes only)</label>
-                                    <input id="newSubjectName" required pattern="^[a-zA-Z0-9\-_]+$" placeholder="e.g. computer-networks" autocomplete="off">
-                                </div>
-                                <p id="createSubjectError" class="login-error" style="display:none;"></p>
-                                <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px;">
-                                    <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
-                                    <button type="submit" class="btn primary-btn">Create</button>
-                                </div>
-                            </form>
-                        </dialog>
 
-                        <!-- Subject Detail Modal -->
-                        <dialog id="subjectDetailModal" class="modal detail-modal" style="width: min(700px, 95vw);">
-                            <div class="modal-header">
-                                <div>
-                                    <h3 id="subjectDetailTitle">Subject: </h3>
-                                    <p class="login-sub" style="margin:0;">Files organized by folder</p>
-                                </div>
-                                <button class="modal-close" onclick="this.closest('dialog').close()">×</button>
-                            </div>
-                            <div class="card-toolbar" style="margin-bottom: 20px; display: flex; gap: 12px;">
-                                <input id="subjectFilesSearch" class="search-input" type="search" placeholder="Search files or folders…" style="flex: 1;" oninput="filterSubjectFiles()">
-                            </div>
-                            <div id="subjectDetailContent" style="padding: 16px 0; max-height: 60vh; overflow-y: auto;">
-                                <!-- JS -->
-                            </div>
-                        </dialog>
+                        <div class="card-toolbar" style="margin-bottom: 18px;">
+                            <input id="coursesSearch" class="search-input" type="search" placeholder="Search courses, folders, or instructors…" style="flex: 1; max-width: 420px;">
+                        </div>
+
+                        <div id="coursesList" class="course-grid"><!-- JS --></div>
                     </section>
 
                     <!-- ═══ SETTINGS ═══ -->
                     <section class="admin-view" id="view-settings" style="display:none;">
-                        <div class="admin-page-title">
-                            <h1>Settings</h1>
-                            <p>Edit `.env` configurations. Changes apply dynamically.</p>
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>Platform Settings</h1>
+                                <p>Edit <code>.env</code> and runtime configurations. Changes apply immediately in memory and persist to <code>.env</code>.</p>
+                            </div>
                         </div>
                         <div class="admin-card">
                             <form id="updateSettingsForm" class="admin-form">
-                                <div id="settingsConfig" class="config-grid" style="grid-column: 1/-1;"><!-- JS --></div>
-                                <button type="submit" class="btn primary-btn" style="grid-column: 1/-1; margin-top: 20px;">Save Settings</button>
+                                <div id="settingsConfig" class="config-grid"><!-- JS --></div>
+                                <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:16px;">
+                                    <button type="button" class="btn" onclick="loadConfig()">Reset</button>
+                                    <button type="submit" class="btn primary-btn">
+                                        <span class="material-symbols-outlined" style="font-size:18px;">save</span>
+                                        Save Settings
+                                    </button>
+                                </div>
                             </form>
                         </div>
                     </section>
 
+                    <!-- ═══ LOGS & JOBS ═══ -->
+                    <section class="admin-view" id="view-logs" style="display:none;">
+                        <div class="admin-page-head">
+                            <div class="admin-page-title">
+                                <h1>Logs &amp; Background Jobs</h1>
+                                <p>Inspect recent background tasks, user chat/file activity, and tail application logs.</p>
+                            </div>
+                            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                                <select id="logLinesSelect" class="course-user-select" style="min-width:130px;" onchange="loadLogs()">
+                                    <option value="100">Last 100 entries</option>
+                                    <option value="250" selected>Last 250 entries</option>
+                                    <option value="500">Last 500 entries</option>
+                                </select>
+                                <button class="btn danger-btn" type="button" onclick="clearLogs()">
+                                    <span class="material-symbols-outlined" style="font-size:16px;">delete_sweep</span>
+                                    Clear Logs
+                                </button>
+                                <button class="btn primary-btn" type="button" onclick="loadLogs()">
+                                    <span class="material-symbols-outlined" style="font-size:16px;">refresh</span>
+                                    Refresh
+                                </button>
+                            </div>
+                        </div>
 
+                        <details class="admin-card collapsible-card" id="recentJobsDetails">
+                            <summary class="collapsible-card-summary">
+                                <span class="collapsible-card-title">
+                                    Recent Background Tasks
+                                    <span class="count-badge" id="jobsCountBadge">0</span>
+                                </span>
+                            </summary>
+                            <div class="collapsible-card-body">
+                                <div id="adminJobsList" class="detail-list"><!-- JS --></div>
+                            </div>
+                        </details>
 
+                        <div class="admin-card">
+                            <div class="card-toolbar" style="align-items:flex-end;">
+                                <h2>Application, User &amp; Agent Activity Logs <span class="count-badge" id="logsCountBadge">0</span></h2>
+                                <button class="btn small-btn" type="button" onclick="resetLogFilters()">Reset Filters</button>
+                            </div>
+                            <div class="log-filter-bar">
+                                <input id="logSearchInput" class="search-input" type="search" placeholder="Search log message, tool, prompt, file…" oninput="applyLogFilters()">
+                                <select id="logUserFilter" class="course-user-select" onchange="applyLogFilters()">
+                                    <option value="">All Users</option>
+                                </select>
+                                <select id="logLevelFilter" class="course-user-select" onchange="applyLogFilters()">
+                                    <option value="">All Levels</option>
+                                    <option value="INFO">INFO</option>
+                                    <option value="WARNING">WARNING</option>
+                                    <option value="ERROR">ERROR</option>
+                                </select>
+                                <label class="log-date-field">
+                                    <span>From</span>
+                                    <input id="logStartDate" type="datetime-local" onchange="applyLogFilters()">
+                                </label>
+                                <label class="log-date-field">
+                                    <span>To</span>
+                                    <input id="logEndDate" type="datetime-local" onchange="applyLogFilters()">
+                                </label>
+                            </div>
+                            <div class="log-viewer-container">
+                                <div id="adminLogsStructured" class="log-entries-list"></div>
+                                <details style="margin-top:10px;">
+                                    <summary style="cursor:pointer; font-size:12px; color:var(--text-secondary);">Raw log output</summary>
+                                    <pre id="adminLogsOutput" class="log-viewer" style="margin-top:8px;">Loading logs…</pre>
+                                </details>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </div>
         </main>
     </div>
 
-    <!-- User detail modal: sessions + generated files -->
-    <dialog id="userDetailModal" class="detail-modal">
-        <div class="detail-modal-head">
-            <div>
-                <h2 id="detailUserName">User</h2>
-                <p id="detailUserMeta" class="login-sub" style="margin:0;">—</p>
-            </div>
-            <button class="action-btn" onclick="document.getElementById('userDetailModal').close()">✕ Close</button>
+    <!-- ═══ DIALOG MODALS ═══ -->
+
+    <!-- Create User Modal -->
+    <dialog id="createUserModal" class="detail-modal" closedby="any" aria-labelledby="createUserModalTitle" style="width: min(520px, 92vw);">
+        <div class="modal-header">
+            <h2 id="createUserModalTitle">Create New User</h2>
+            <button type="button" class="modal-close" aria-label="Close dialog" onclick="this.closest('dialog').close()">✕</button>
         </div>
-
-        <h3>Chat sessions <span class="count-badge" id="detailSessionCount">0</span></h3>
-        <div id="detailSessions" class="detail-list"><!-- JS --></div>
-
-        <h3>Generated files <span class="count-badge" id="detailFileCount">0</span></h3>
-        <div id="detailFiles" class="detail-list"><!-- JS --></div>
+        <form id="createUserForm" class="admin-form">
+            <div class="admin-field">
+                <label for="newUsername">Username (Unique)</label>
+                <input id="newUsername" required minlength="2" placeholder="e.g. prof.ramesh" autocomplete="off" autofocus>
+            </div>
+            <div class="admin-field-row">
+                <div class="admin-field">
+                    <label for="newFullName">Full Name</label>
+                    <input id="newFullName" placeholder="e.g. Ramesh Kumar" autocomplete="off">
+                </div>
+                <div class="admin-field">
+                    <label for="newEmail">Email (Unique)</label>
+                    <input id="newEmail" type="email" placeholder="e.g. ramesh@klyra.edu" autocomplete="off">
+                </div>
+            </div>
+            <div class="admin-field-row">
+                <div class="admin-field">
+                    <label for="newPassword">Password (min 6 chars)</label>
+                    <input id="newPassword" type="password" required minlength="6" autocomplete="new-password">
+                </div>
+                <div class="admin-field">
+                    <label for="newRole">Role</label>
+                    <select id="newRole">
+                        <option value="instructor" selected>Instructor</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+            </div>
+            <div class="admin-field">
+                <label for="newCourses">Assigned Courses</label>
+                <div id="newCoursesPicker" class="course-picker-chips"><!-- JS checkboxes --></div>
+                <input id="newCourses" placeholder="Comma-separated subject IDs (e.g. dbms, python)" autocomplete="off">
+            </div>
+            <p id="createError" class="login-error" style="display:none;"></p>
+            <div class="modal-footer">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn primary-btn">Create User</button>
+            </div>
+        </form>
     </dialog>
 
-    <!-- Chat History Viewer modal -->
-    <dialog id="chatViewerModal" class="detail-modal" style="width: 800px; max-width: 90vw;">
-        <div class="detail-modal-head">
-            <div>
-                <h2 id="chatViewerTitle">Chat Session</h2>
-            </div>
-            <button class="action-btn" onclick="document.getElementById('chatViewerModal').close()">✕ Close</button>
+    <!-- Edit User Modal -->
+    <dialog id="editUserModal" class="detail-modal" closedby="any" aria-labelledby="editUserModalTitle" style="width: min(520px, 92vw);">
+        <div class="modal-header">
+            <h2 id="editUserModalTitle">Edit User</h2>
+            <button type="button" class="modal-close" aria-label="Close dialog" onclick="this.closest('dialog').close()">✕</button>
         </div>
-        <div id="chatViewerContent" style="padding: 16px; display: flex; flex-direction: column; gap: 12px; max-height: 60vh; overflow-y: auto;">
+        <form id="editUserForm" class="admin-form">
+            <input type="hidden" id="editUserId">
+            <div class="admin-field">
+                <label for="editUsername">Username (Unique)</label>
+                <input id="editUsername" required minlength="2" placeholder="e.g. prof.ramesh" autocomplete="off">
+            </div>
+            <div class="admin-field-row">
+                <div class="admin-field">
+                    <label for="editFullName">Full Name</label>
+                    <input id="editFullName" placeholder="e.g. Ramesh Kumar" autocomplete="off" autofocus>
+                </div>
+                <div class="admin-field">
+                    <label for="editEmail">Email (Unique)</label>
+                    <input id="editEmail" type="email" placeholder="e.g. ramesh@klyra.edu" autocomplete="off">
+                </div>
+            </div>
+            <div class="admin-field-row">
+                <div class="admin-field">
+                    <label for="editPassword">New Password (leave blank to keep)</label>
+                    <input id="editPassword" type="password" placeholder="••••••••" autocomplete="new-password">
+                </div>
+                <div class="admin-field">
+                    <label for="editRole">Role</label>
+                    <select id="editRole">
+                        <option value="instructor">Instructor</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+            </div>
+            <div class="admin-field">
+                <label for="editCourses">Assigned Courses</label>
+                <div id="editCoursesPicker" class="course-picker-chips"><!-- JS checkboxes --></div>
+                <input id="editCourses" placeholder="Comma-separated subject IDs (e.g. dbms, python)" autocomplete="off">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn primary-btn">Save Changes</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Create Subject Modal -->
+    <dialog id="createSubjectModal" class="detail-modal" closedby="any" aria-labelledby="createSubjectModalTitle" style="width: min(440px, 92vw);">
+        <div class="modal-header">
+            <h2 id="createSubjectModalTitle">Create New Subject</h2>
+            <button type="button" class="modal-close" aria-label="Close dialog" onclick="this.closest('dialog').close()">✕</button>
+        </div>
+        <form id="createSubjectForm" class="admin-form">
+            <div class="admin-field">
+                <label for="newSubjectName">Subject Identifier (lowercase alphanumeric, dashes, underscores)</label>
+                <input id="newSubjectName" required pattern="^[a-zA-Z0-9\-_]+$" placeholder="e.g. computer-networks" autocomplete="off" autofocus>
+            </div>
+            <label class="checkbox-row">
+                <input type="checkbox" id="newSubjectInitFolders" checked>
+                <span>Create standard folders (<code>week_1</code>, <code>pyq</code>, <code>transcripts</code>, <code>additional</code>, <code>generated</code>)</span>
+            </label>
+            <label class="checkbox-row">
+                <input type="checkbox" id="newSubjectInitSkill" checked>
+                <span>Initialize default <code>skill.md</code> configuration</span>
+            </label>
+            <p id="createSubjectError" class="login-error" style="display:none;"></p>
+            <div class="modal-footer">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn primary-btn">Create Subject</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Subject Detail Modal -->
+    <dialog id="subjectDetailModal" class="detail-modal" closedby="any" aria-labelledby="subjectDetailTitle" style="width: min(820px, 95vw);">
+        <div class="modal-header">
+            <div>
+                <h2 id="subjectDetailTitle">Subject</h2>
+                <p class="login-sub" style="margin:2px 0 0; text-align:left;">Browse, preview in new tab, download, reassign owner, or delete subject files</p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <a id="subjectDownloadAllBtn" href="#" class="btn small-btn" download>
+                    <span class="material-symbols-outlined" style="font-size:16px;">folder_zip</span> Download All (.zip)
+                </a>
+                <button type="button" class="modal-close" aria-label="Close dialog" onclick="this.closest('dialog').close()">✕</button>
+            </div>
+        </div>
+        <div class="card-toolbar" style="margin-bottom: 14px;">
+            <input id="subjectFilesSearch" class="search-input" type="search" placeholder="Filter files, folders, or owner…" style="flex: 1; width:100%;" oninput="filterSubjectFiles()">
+        </div>
+        <div id="subjectDetailContent" style="max-height: 62vh; overflow-y: auto; padding-right: 4px;">
             <!-- JS -->
         </div>
     </dialog>
 
-    <script src="/static/admin.js?v=3"></script>
+    <!-- Subject skill.md Editor Modal -->
+    <dialog id="skillEditorModal" class="detail-modal" closedby="any" aria-labelledby="skillEditorTitle" style="width: min(780px, 95vw);">
+        <div class="modal-header">
+            <div>
+                <h2 id="skillEditorTitle">Subject skill.md</h2>
+                <p id="skillEditorSub" class="login-sub" style="margin:2px 0 0; text-align:left;">Configure subject notation, question types, and coding languages</p>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+                <button type="button" class="btn small-btn" onclick="resetSkillToDefaultTemplate()" title="Load default skill.md template">
+                    <span class="material-symbols-outlined" style="font-size:15px;">restart_alt</span> Default Template
+                </button>
+                <button type="button" class="modal-close" aria-label="Close dialog" onclick="this.closest('dialog').close()">✕</button>
+            </div>
+        </div>
+        <form id="skillEditorForm" class="admin-form">
+            <input type="hidden" id="skillEditorSubject">
+            <textarea id="skillEditorTextarea" class="skill-editor-textarea" rows="18" spellcheck="false"></textarea>
+            <div class="modal-footer">
+                <button type="button" class="btn" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn primary-btn">
+                    <span class="material-symbols-outlined" style="font-size:16px;">save</span> Save skill.md
+                </button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- User detail modal: sessions + artifacts (uploaded & generated) with search & filter -->
+    <dialog id="userDetailModal" class="detail-modal" closedby="any" aria-labelledby="detailUserName" style="width: min(820px, 95vw);">
+        <div class="modal-header">
+            <div>
+                <h2 id="detailUserName">User</h2>
+                <p id="detailUserMeta" class="login-sub" style="margin:2px 0 0; text-align:left;">—</p>
+            </div>
+            <button type="button" class="modal-close" aria-label="Close dialog" onclick="document.getElementById('userDetailModal').close()">✕</button>
+        </div>
+
+        <div class="user-data-filter-bar">
+            <div class="user-data-filter-row">
+                <input id="userDetailSearch" class="search-input" type="search" placeholder="Search chats or artifacts by title, filename, course…" oninput="filterUserDetailItems()">
+                <select id="userDetailSectionFilter" class="course-user-select" onchange="filterUserDetailItems()">
+                    <option value="all">All (Chats &amp; Artifacts)</option>
+                    <option value="chats">Chat Sessions Only</option>
+                    <option value="artifacts">Artifacts Only (All)</option>
+                    <option value="uploaded">Uploaded Artifacts Only</option>
+                    <option value="generated">Generated Artifacts Only</option>
+                </select>
+                <select id="userDetailCourseFilter" class="course-user-select" onchange="filterUserDetailItems()">
+                    <option value="">All Courses</option>
+                </select>
+                <select id="userDetailTypeFilter" class="course-user-select" onchange="filterUserDetailItems()">
+                    <option value="">All File Types</option>
+                    <option value=".md">Markdown (.md)</option>
+                    <option value=".pdf">PDF (.pdf)</option>
+                    <option value=".png">Image (.png/.jpg)</option>
+                    <option value=".py">Code (.py/.sql/.sh)</option>
+                    <option value=".json">JSON (.json)</option>
+                    <option value=".docx">Word (.doc/.docx)</option>
+                    <option value=".zip">Archive (.zip)</option>
+                </select>
+            </div>
+            <div class="user-data-filter-row">
+                <select id="userDetailTimePreset" class="course-user-select" onchange="onUserDetailTimePresetChange()">
+                    <option value="">All Time</option>
+                    <option value="24h">Last 24 Hours</option>
+                    <option value="7d">Last 7 Days</option>
+                    <option value="30d">Last 30 Days</option>
+                    <option value="custom">Custom Range</option>
+                </select>
+                <label class="log-date-field">
+                    <span>From</span>
+                    <input id="userDetailStartDate" type="datetime-local" onchange="onUserDetailCustomDateChange()">
+                </label>
+                <label class="log-date-field">
+                    <span>To</span>
+                    <input id="userDetailEndDate" type="datetime-local" onchange="onUserDetailCustomDateChange()">
+                </label>
+                <button type="button" class="btn small-btn" onclick="resetUserDetailFilters()" style="margin-left:auto;">Reset</button>
+            </div>
+        </div>
+
+        <div id="userDetailChatsSection">
+            <h3>Chat sessions <span class="count-badge" id="detailSessionCount">0</span></h3>
+            <div id="detailSessions" class="detail-list"><!-- JS --></div>
+        </div>
+
+        <div id="userDetailFilesSection">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin:16px 0 10px;">
+                <h3 style="margin:0;">Artifacts (Uploaded &amp; Generated) <span class="count-badge" id="detailFileCount">0</span></h3>
+                <div class="admin-art-tabs" id="detailArtSourceTabs">
+                    <button type="button" class="admin-art-tab active" data-section="artifacts" onclick="setUserDetailArtifactTab('artifacts')">All <span class="count-badge" id="detailArtAllCount">0</span></button>
+                    <button type="button" class="admin-art-tab" data-section="uploaded" onclick="setUserDetailArtifactTab('uploaded')">Uploaded <span class="count-badge" id="detailArtUploadedCount">0</span></button>
+                    <button type="button" class="admin-art-tab" data-section="generated" onclick="setUserDetailArtifactTab('generated')">Generated <span class="count-badge" id="detailArtGeneratedCount">0</span></button>
+                </div>
+            </div>
+            <div id="detailFiles" class="detail-list"><!-- JS --></div>
+        </div>
+    </dialog>
+
+    <!-- Chat History Viewer modal -->
+    <dialog id="chatViewerModal" class="detail-modal" closedby="any" aria-labelledby="chatViewerTitle" style="width: min(820px, 94vw);">
+        <div class="modal-header">
+            <div>
+                <h2 id="chatViewerTitle">Chat Session</h2>
+                <p id="chatViewerMeta" class="login-sub" style="margin:2px 0 0; text-align:left;"></p>
+            </div>
+            <button type="button" class="modal-close" aria-label="Close dialog" onclick="document.getElementById('chatViewerModal').close()">✕</button>
+        </div>
+        <div id="chatViewerContent" class="chat-viewer-messages">
+            <!-- JS -->
+        </div>
+    </dialog>
+
+    <!-- Custom UI Confirmation Modal (replaces browser default confirm()) -->
+    <dialog id="confirmModal" class="detail-modal confirm-modal" closedby="any" aria-labelledby="confirmModalTitle" style="width: min(440px, 92vw);">
+        <div class="modal-header">
+            <h2 id="confirmModalTitle">Confirm Action</h2>
+            <button type="button" class="modal-close" aria-label="Close dialog" id="confirmModalCloseBtn">✕</button>
+        </div>
+        <p id="confirmModalMessage" class="confirm-modal-message"></p>
+        <div class="modal-footer">
+            <button type="button" class="btn" id="confirmModalCancelBtn">Cancel</button>
+            <button type="button" class="btn danger-btn" id="confirmModalOkBtn">Confirm</button>
+        </div>
+    </dialog>
+
+    <!-- Toast notification container -->
+    <div id="adminToastContainer" class="admin-toast-container" aria-live="polite"></div>
+
+    <script src="/static/admin.js?v=13"></script>
 </body>
 </html>

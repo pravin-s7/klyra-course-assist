@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import os
 import socket
@@ -10,6 +11,10 @@ import time
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _sanitize(args: dict) -> dict:
@@ -29,6 +34,16 @@ async def _stop_voice(task, ref):
             pass
 
 
+def _voice_response_enabled() -> bool:
+    """Return True when spoken voice responses are enabled via CLI (`--voice-response`)."""
+    return os.environ.get("KLYRA_VOICE_RESPONSE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 async def _run_voice_session(
     ws: WebSocket,
     ref: dict,
@@ -38,6 +53,7 @@ async def _run_voice_session(
     user,
     sync_save,
     allowed_subjects: set | None = None,
+    voice_response: bool | None = None,
 ):
     """Run a Gemini Live API voice session, forwarding audio/events to the WebSocket."""
     from google import genai
@@ -46,9 +62,13 @@ async def _run_voice_session(
     from klyra.voice.tool_declarations import get_all_declarations
     from klyra.voice.tool_executor import ToolExecutor
 
+    enable_voice_response = (
+        _voice_response_enabled() if voice_response is None else bool(voice_response)
+    )
+
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    model = os.environ.get("KLYRA_VOICE_MODEL", "gemini-3.8-live")
-    voice_name = os.environ.get("KLYRA_VOICE_NAME", "Zephyr")
+    model = os.environ.get("KLYRA_VOICE_MODEL") or "gemini-3.1-flash-live-preview"
+    voice_name = os.environ.get("KLYRA_VOICE_NAME") or "Puck"
     client = genai.Client(api_key=api_key)
 
     ws_lock = asyncio.Lock()
@@ -72,7 +92,9 @@ async def _run_voice_session(
 
     executor = ToolExecutor(on_log_callback=on_tool_log, allowed_subjects=allowed_subjects)
 
-    sys_inst = SYSTEM_INSTRUCTION
+    from klyra.chat.guardrails import build_subject_guardrail_instruction
+
+    sys_inst = SYSTEM_INSTRUCTION + build_subject_guardrail_instruction(allowed_subjects)
     history_lines: list[str] = []
     if orchestrator and hasattr(orchestrator, "_history") and orchestrator._history:
         for msg in orchestrator._history[-20:]:
@@ -98,6 +120,8 @@ async def _run_voice_session(
 
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
@@ -127,135 +151,199 @@ async def _run_voice_session(
         async with client.aio.live.connect(model=model, config=config) as session:
             ref["session"] = session
             ref["active"] = True
-            await safe_send_json({"type": "voice_started"})
+            await safe_send_json(
+                {"type": "voice_started", "voice_response": enable_voice_response}
+            )
 
+            current_user_text = ""
             current_model_text = ""
 
-            async for response in session.receive():
-                if response.tool_call and response.tool_call.function_calls:
-                    tool_responses = []
-                    for fc in response.tool_call.function_calls:
-                        fc_args = dict(fc.args) if fc.args else {}
-                        if allowed_subjects is not None:
-                            subj = str(fc_args.get("subject", "")).lower()
-                            if subj and subj not in allowed_subjects:
-                                deny = {
-                                    "status": "error",
-                                    "message": f"Access denied: you are not assigned to the course '{subj}'.",
-                                    "tool": fc.name,
-                                }
-                                tool_responses.append(
-                                    types.FunctionResponse(name=fc.name, id=fc.id, response=deny)
-                                )
-                                await safe_send_json(
-                                    {
-                                        "type": "tool_done",
-                                        "tool": fc.name,
+            def _flush_user_transcript():
+                nonlocal current_user_text
+                cleaned = current_user_text.strip()
+                if cleaned:
+                    user_event = {
+                        "type": "user_transcript",
+                        "text": cleaned,
+                        "final": True,
+                        "timestamp": _utc_now(),
+                    }
+                    chat_history.append(user_event)
+                    orchestrator._history.append(
+                        types.Content(role="user", parts=[types.Part(text=cleaned)])
+                    )
+                current_user_text = ""
+
+            async def _flush_model_transcript():
+                nonlocal current_model_text
+                if not current_model_text:
+                    return
+                model_event = {
+                    "type": "klyra_text",
+                    "text": current_model_text,
+                    "timestamp": _utc_now(),
+                }
+                chat_history.append(model_event)
+                orchestrator._history.append(
+                    types.Content(
+                        role="model", parts=[types.Part(text=current_model_text)]
+                    )
+                )
+                if orchestrator is not None and orchestrator._on_file_link:
+                    try:
+                        await orchestrator._emit_download_cards_from_text(
+                            current_model_text
+                        )
+                    except Exception as e:
+                        logger.debug("emit download cards failed: %s", e)
+                current_model_text = ""
+
+            while ref["active"]:
+                had_responses = False
+                async for response in session.receive():
+                    had_responses = True
+                    if response.tool_call and response.tool_call.function_calls:
+                        _flush_user_transcript()
+                        tool_responses = []
+                        for fc in response.tool_call.function_calls:
+                            fc_args = dict(fc.args) if fc.args else {}
+                            if allowed_subjects is not None:
+                                subj = str(fc_args.get("subject", "")).lower()
+                                if subj and subj not in allowed_subjects:
+                                    deny = {
                                         "status": "error",
-                                        "message": deny["message"][:500],
+                                        "message": f"Access denied: you are not assigned to the course '{subj}'.",
+                                        "tool": fc.name,
                                     }
-                                )
-                                continue
-
-                        orchestrator._history.append(
-                            types.Content(
-                                role="model",
-                                parts=[
-                                    types.Part(
-                                        function_call=types.FunctionCall(name=fc.name, args=fc_args)
+                                    tool_responses.append(
+                                        types.FunctionResponse(name=fc.name, id=fc.id, response=deny)
                                     )
-                                ],
-                            )
-                        )
-
-                        start_event = {
-                            "type": "tool_start",
-                            "tool": fc.name,
-                            "args": _sanitize(fc_args),
-                        }
-                        chat_history.append(start_event)
-                        await safe_send_json(start_event)
-
-                        tool_start_time = time.time()
-                        result = await executor.execute(fc.name, fc_args)
-                        status = result.get("status", "error")
-                        msg = result.get("message", "")
-
-                        done_event = {
-                            "type": "tool_done",
-                            "tool": fc.name,
-                            "status": status,
-                            "message": msg[:500],
-                        }
-                        chat_history.append(done_event)
-                        await safe_send_json(done_event)
-
-                        if status == "success" and orchestrator is not None:
-                            try:
-                                await orchestrator._detect_files(
-                                    fc.name, fc_args, msg, since_time=tool_start_time
-                                )
-                            except Exception as e:
-                                logger.debug("file detection/ownership tagging failed: %s", e)
-
-                        orchestrator._history.append(
-                            types.Content(
-                                role="user",
-                                parts=[
-                                    types.Part(
-                                        function_response=types.FunctionResponse(
-                                            name=fc.name, response=result
-                                        )
+                                    await safe_send_json(
+                                        {
+                                            "type": "tool_done",
+                                            "tool": fc.name,
+                                            "status": "error",
+                                            "message": deny["message"][:500],
+                                        }
                                     )
-                                ],
-                            )
-                        )
-                        tool_responses.append(
-                            types.FunctionResponse(name=fc.name, id=fc.id, response=result)
-                        )
+                                    continue
 
-                    if tool_responses:
-                        await session.send_tool_response(function_responses=tool_responses)
-
-                if response.server_content is not None:
-                    sc = response.server_content
-
-                    if sc.input_transcription:
-                        text = sc.input_transcription.text
-                        user_event = {"type": "user_transcript", "text": text, "final": True}
-                        await safe_send_json(user_event)
-                        chat_history.append(user_event)
-                        orchestrator._history.append(
-                            types.Content(role="user", parts=[types.Part(text=text)])
-                        )
-
-                    if sc.output_transcription:
-                        text = sc.output_transcription.text
-                        await safe_send_json({"type": "klyra_transcript", "text": text})
-                        current_model_text += text
-
-                    if sc.model_turn is not None:
-                        for part in sc.model_turn.parts:
-                            if part.inline_data and part.inline_data.data:
-                                await safe_send_bytes(part.inline_data.data)
-
-                    if sc.turn_complete:
-                        if current_model_text:
-                            model_event = {"type": "klyra_text", "text": current_model_text}
-                            chat_history.append(model_event)
                             orchestrator._history.append(
                                 types.Content(
-                                    role="model", parts=[types.Part(text=current_model_text)]
+                                    role="model",
+                                    parts=[
+                                        types.Part(
+                                            function_call=types.FunctionCall(name=fc.name, args=fc_args)
+                                        )
+                                    ],
                                 )
                             )
-                            current_model_text = ""
 
-                        turn_event = {"type": "turn_complete"}
-                        chat_history.append(turn_event)
-                        await safe_send_json(turn_event)
+                            start_event = {
+                                "type": "tool_start",
+                                "tool": fc.name,
+                                "args": _sanitize(fc_args),
+                            }
+                            chat_history.append(start_event)
+                            await safe_send_json(start_event)
 
-                        if session_id:
-                            sync_save()
+                            tool_start_time = time.time()
+                            result = await executor.execute(fc.name, fc_args)
+                            status = result.get("status", "error")
+                            msg = result.get("message", "")
+
+                            done_event = {
+                                "type": "tool_done",
+                                "tool": fc.name,
+                                "status": status,
+                                "message": msg[:500],
+                            }
+                            chat_history.append(done_event)
+                            await safe_send_json(done_event)
+
+                            if status == "success" and orchestrator is not None:
+                                try:
+                                    await orchestrator._detect_files(
+                                        fc.name, fc_args, msg, since_time=tool_start_time
+                                    )
+                                except Exception as e:
+                                    logger.debug("file detection/ownership tagging failed: %s", e)
+
+                            orchestrator._history.append(
+                                types.Content(
+                                    role="user",
+                                    parts=[
+                                        types.Part(
+                                            function_response=types.FunctionResponse(
+                                                name=fc.name, response=result
+                                            )
+                                        )
+                                    ],
+                                )
+                            )
+                            tool_responses.append(
+                                types.FunctionResponse(name=fc.name, id=fc.id, response=result)
+                            )
+
+                        if tool_responses:
+                            await session.send_tool_response(function_responses=tool_responses)
+
+                    if response.server_content is not None:
+                        sc = response.server_content
+
+                        if sc.input_transcription and sc.input_transcription.text:
+                            text = sc.input_transcription.text
+                            current_user_text += text
+                            await safe_send_json(
+                                {"type": "user_transcript", "text": text, "streaming": True}
+                            )
+
+                        if sc.output_transcription and sc.output_transcription.text:
+                            _flush_user_transcript()
+                            text = sc.output_transcription.text
+                            await safe_send_json({"type": "klyra_transcript", "text": text})
+                            current_model_text += text
+
+                        if sc.model_turn is not None:
+                            _flush_user_transcript()
+                            has_output_transcript = bool(
+                                sc.output_transcription and sc.output_transcription.text
+                            )
+                            for part in sc.model_turn.parts:
+                                # Stream voice audio back only when `--voice-response` is enabled via CLI.
+                                if (
+                                    enable_voice_response
+                                    and getattr(part, "inline_data", None) is not None
+                                    and getattr(part.inline_data, "data", None)
+                                ):
+                                    await safe_send_bytes(part.inline_data.data)
+                                if (
+                                    not has_output_transcript
+                                    and part.text
+                                    and not getattr(part, "thought", False)
+                                ):
+                                    await safe_send_json(
+                                        {"type": "klyra_transcript", "text": part.text}
+                                    )
+                                    current_model_text += part.text
+
+                        if getattr(sc, "interrupted", False):
+                            await _flush_model_transcript()
+                            await safe_send_json({"type": "voice_interrupted"})
+
+                        if sc.turn_complete:
+                            _flush_user_transcript()
+                            await _flush_model_transcript()
+
+                            turn_event = {"type": "turn_complete", "timestamp": _utc_now()}
+                            chat_history.append(turn_event)
+                            await safe_send_json(turn_event)
+
+                            if session_id:
+                                sync_save()
+
+                if not had_responses:
+                    break
 
     except asyncio.CancelledError:
         pass

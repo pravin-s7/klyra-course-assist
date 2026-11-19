@@ -76,20 +76,30 @@ class ToolExecutor:
         if "subject" in args and isinstance(args["subject"], str):
             args["subject"] = args["subject"].lower()
 
-        if (
-            self.allowed_subjects is not None
-            and isinstance(args.get("subject"), str)
-            and args["subject"]
-            and args["subject"] not in self.allowed_subjects
-        ):
-            return {
-                "status": "error",
-                "message": (
-                    f"Access denied: you are not assigned to the course "
-                    f"'{args['subject']}'. Ask your admin to assign it."
-                ),
-                "tool": name,
-            }
+        if self.allowed_subjects is not None:
+            subj_arg = args.get("subject")
+            if not self.allowed_subjects and "subject" in args:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Access denied: you have no assigned subjects. "
+                        "Ask your admin to assign a course."
+                    ),
+                    "tool": name,
+                }
+            if (
+                isinstance(subj_arg, str)
+                and subj_arg
+                and subj_arg not in self.allowed_subjects
+            ):
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Access denied: you are not assigned to the course "
+                        f"'{subj_arg}'. Ask your admin to assign it."
+                    ),
+                    "tool": name,
+                }
 
         handler = tool_def.handler
         logger.info("Executing tool %s with args %s", name, args)
